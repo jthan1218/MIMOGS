@@ -1,13 +1,13 @@
 import math
 import os
-from tokenize import Floatnumber
+from typing import Optional, Dict
 
 import numpy as np
 import scipy.io as sio
 import torch
-from torch import nn
 import torch.nn.functional as F
 from plyfile import PlyData, PlyElement
+from torch import nn
 
 from utils.general_utils import (
     inverse_sigmoid,
@@ -17,16 +17,16 @@ from utils.general_utils import (
     mkdir_p,
 )
 
-from typing import Optional, Dict, Any
 
 class GaussianModel:
-    """MIMOGS Gaussian scene model
+    """
+    MIMOGS Gaussian scene model
 
     Learnable attributes per Gaussian:
-    - mean                  : xyz
-    - covariance            : rotation + scaling
-    - complex gain          : magnitude + phase
-    - opacity-like weight   :opacity
+    - mean                : xyz
+    - covariance          : rotation + scaling
+    - complex gain        : magnitude + phase
+    - opacity-like weight : opacity
     """
 
     def __init__(
@@ -41,20 +41,20 @@ class GaussianModel:
         self.target_gaussians = target_gaussians
         self.init_range = init_range
 
-        self._xyz = torch.empty(0, device = self.device)
-        self._scaling = torch.empty(0, device = self.device)
-        self._rotation = torch.empty(0, device = self.device)
-        self._opacity = torch.empty(0, device = self.device)
-        self._gain_mag = torch.empty(0, device = self.device)
-        self._gain_phase = torch.empty(0, device = self.device)
+        self._xyz = torch.empty(0, device=self.device)
+        self._scaling = torch.empty(0, device=self.device)      # raw log-scale
+        self._rotation = torch.empty(0, device=self.device)     # raw quaternion
+        self._opacity = torch.empty(0, device=self.device)      # raw opacity
+        self._gain_mag = torch.empty(0, device=self.device)     # raw magnitude
+        self._gain_phase = torch.empty(0, device=self.device)   # raw phase
 
         self.optimizer = None
         self.xyz_scheduler_args = None
 
-        self.xyz_gradient_accum = torch.empty(0,device = self.device)
-        self.grad_denom = torch.empty(0,device = self.device)
-        self.importance_accum = torch.empty(0,device = self.device)
-        self.importance_denom = torch.empty(0,device = self.device)
+        self.xyz_gradient_accum = torch.empty(0, device=self.device)
+        self.grad_denom = torch.empty(0, device=self.device)
+        self.importance_accum = torch.empty(0, device=self.device)
+        self.importance_denom = torch.empty(0, device=self.device)
 
         self.setup_functions()
 
@@ -72,7 +72,9 @@ class GaussianModel:
 
         self.covariance_activation = build_covariance_from_scaling_rotation
 
-
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
     @property
     def get_xyz(self):
         return self._xyz
@@ -109,7 +111,7 @@ class GaussianModel:
 
     def get_covariance(self, scaling_modifier: float = 1.0):
         return self.covariance_activation(
-            self.get_scaling, scaling_modifier, self.get_rotation, return_strip = True
+            self.get_scaling, scaling_modifier, self.get_rotation, return_strip=False
         )
 
     # ------------------------------------------------------------------
@@ -124,62 +126,63 @@ class GaussianModel:
                 vertices = mat.get("vertices", None)
                 if vertices is not None and vertices.size > 0:
                     base_points = torch.tensor(
-                        vertices, dtype = torch.float32, device = self.device
+                        vertices, dtype=torch.float32, device=self.device
                     )
                     base_count = base_points.shape[0]
 
-                    if base_count > self.target_gaussians:
+                    if base_count >= self.target_gaussians:
                         fused_point_cloud = base_points[: self.target_gaussians]
                     else:
                         repeat_idx = torch.randint(
                             0,
                             base_count,
                             (self.target_gaussians,),
-                            device = self.device,
+                            device=self.device,
                         )
                         jitter = (
-                            torch.randn((self.target_gaussians, 3), device = self.device) * 0.01
+                            torch.randn((self.target_gaussians, 3), device=self.device)
+                            * 0.01
                         )
                         fused_point_cloud = base_points[repeat_idx] + jitter
             except Exception as exc:
                 print(
-                    f"Failed to load vertices from {vertices_path}."
-                    f"Fallback to random initialization: {exc}"
+                    f"[GaussianModel] Failed to load vertices from {vertices_path}. "
+                    f"Fallback to random init. Error: {exc}"
                 )
 
         if fused_point_cloud is None:
             fused_point_cloud = (
-                torch.randn((self.target_gaussians, 3), device = self.device).float() * self.init_range
+                torch.randn((self.target_gaussians, 3), device=self.device).float()
+                * self.init_range
             )
 
         return fused_point_cloud
-    
 
     def gaussian_init(self, vertices_path: Optional[str] = None):
-        fused_point_cloud = self._build_initial_points(vertices_path = vertices_path)
+        fused_point_cloud = self._build_initial_points(vertices_path=vertices_path)
         n_points = fused_point_cloud.shape[0]
 
-        scene_scale = fused_point_cloud.std(dim = 0).mean().clamp(min = 1e-3)
+        scene_scale = fused_point_cloud.std(dim=0).mean().clamp(min=1e-3)
         init_scale = torch.full(
             (n_points, 3),
             0.05 * scene_scale.item(),
-            dtype = torch.float32,
-            device = self.device,
+            dtype=torch.float32,
+            device=self.device,
         )
         scales_raw = self.scaling_inverse_activation(init_scale)
 
-        rots = torch.zeros((n_points, 4), dtype = torch.float32, device = self.device)
+        rots = torch.zeros((n_points, 4), dtype=torch.float32, device=self.device)
         rots[:, 0] = 1.0
 
         opacities_raw = self.inverse_opacity_activation(
-            0.1 * torch.ones((n_points, 1), dtype=torch.float32, device = self.device)
+            0.1 * torch.ones((n_points, 1), dtype=torch.float32, device=self.device)
         )
 
         gain_mag_raw = self.gain_mag_inverse_activation(
-            0.1 * torch.ones((n_points, 1), dtype = torch.float32, device = self.device)
+            0.1 * torch.ones((n_points, 1), dtype=torch.float32, device=self.device)
         )
         gain_phase = 2.0 * math.pi * torch.rand(
-            (n_points, 1), dtype = torch.float32, device = self.device
+            (n_points, 1), dtype=torch.float32, device=self.device
         )
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
@@ -241,7 +244,7 @@ class GaussianModel:
         self.grad_denom = grad_denom.to(self.device)
         self.importance_accum = importance_accum.to(self.device)
         self.importance_denom = importance_denom.to(self.device)
-        
+
         if opt_dict is not None:
             self.optimizer.load_state_dict(opt_dict)
 
@@ -250,14 +253,14 @@ class GaussianModel:
     # ------------------------------------------------------------------
     def _reset_statistics(self):
         n = self._xyz.shape[0]
-        self.xyz_gradient_accum = torch.zeros((n, 1), device = self.device)
-        self.grad_denom = torch.zeros((n, 1), device = self.device)
-        self.importance_accum = torch.zeros((n, 1), device = self.device)
-        self.importance_denom = torch.zeros((n, 1), device = self.device)
+        self.xyz_gradient_accum = torch.zeros((n, 1), device=self.device)
+        self.grad_denom = torch.zeros((n, 1), device=self.device)
+        self.importance_accum = torch.zeros((n, 1), device=self.device)
+        self.importance_denom = torch.zeros((n, 1), device=self.device)
 
     def training_setup(self, training_args):
         self._reset_statistics()
-        
+
         param_groups = [
             {"params": [self._xyz], "lr": training_args.position_lr_init, "name": "xyz"},
             {"params": [self._opacity], "lr": training_args.opacity_lr, "name": "opacity"},
@@ -268,15 +271,15 @@ class GaussianModel:
         ]
 
         if getattr(training_args, "optimizer_type", self.optimizer_type) == "adamw":
-            self.optimizer = torch.optim.AdamW(param_groups, lr = 0.0, eps = 1e-15)
+            self.optimizer = torch.optim.AdamW(param_groups, lr=0.0, eps=1e-15)
         else:
-            self.optimizer = torch.optim.Adam(param_groups, lr = 0.0, eps = 1e-15)
+            self.optimizer = torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
 
         self.xyz_scheduler_args = get_expon_lr_func(
-            lr_init = training_args.position_lr_init,
-            lr_final = training_args.position_lr_final,
-            lr_delay_mult = training_args.position_lr_delay_mult,
-            max_steps = training_args.position_lr_max_steps,
+            lr_init=training_args.position_lr_init,
+            lr_final=training_args.position_lr_final,
+            lr_delay_mult=training_args.position_lr_delay_mult,
+            max_steps=training_args.position_lr_max_steps,
         )
 
     def update_learning_rate(self, iteration: int):
@@ -293,7 +296,6 @@ class GaussianModel:
     # ------------------------------------------------------------------
     # Statistics for pruning / densification
     # ------------------------------------------------------------------
-
     def accumulate_training_stats(self, importance: Optional[torch.Tensor] = None):
         if self._xyz.grad is None:
             return
@@ -341,9 +343,9 @@ class GaussianModel:
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
         attributes = np.concatenate(
-            [xyz, normals, opacities, scales, rotations, gain_mag, gain_phase], axis = 1
+            [xyz, normals, opacities, scales, rotations, gain_mag, gain_phase], axis=1
         )
-        elements[:] = list[tuple](map[tuple](tuple, attributes))
+        elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, "vertex")
         PlyData([el]).write(path)
 
@@ -356,7 +358,7 @@ class GaussianModel:
                 np.asarray(plydata.elements[0]["y"]),
                 np.asarray(plydata.elements[0]["z"]),
             ],
-            axis = 1,
+            axis=1,
         )
 
         opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
@@ -364,13 +366,13 @@ class GaussianModel:
         scale_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("scale_")]
         scale_names = sorted(scale_names, key=lambda x: int(x.split("_")[-1]))
         scales = np.zeros((xyz.shape[0], len(scale_names)), dtype=np.float32)
-        for idx, attr_name in enumerate[Any](scale_names):
+        for idx, attr_name in enumerate(scale_names):
             scales[:, idx] = np.asarray(plydata.elements[0][attr_name])
 
         rot_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("rot_")]
         rot_names = sorted(rot_names, key=lambda x: int(x.split("_")[-1]))
         rots = np.zeros((xyz.shape[0], len(rot_names)), dtype=np.float32)
-        for idx, attr_name in enumerate[Any](rot_names):
+        for idx, attr_name in enumerate(rot_names):
             rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
 
         gain_mag = np.asarray(plydata.elements[0]["gain_mag"])[..., np.newaxis]
@@ -394,7 +396,6 @@ class GaussianModel:
         self._gain_mag = nn.Parameter(
             self.gain_mag_inverse_activation(torch.clamp(gain_mag_t, min=1e-8)).requires_grad_(True)
         )
-
         self._gain_phase = nn.Parameter(gain_phase_t.requires_grad_(True))
 
         self._reset_statistics()
@@ -402,8 +403,7 @@ class GaussianModel:
     # ------------------------------------------------------------------
     # Optimizer-safe tensor replacement helpers
     # ------------------------------------------------------------------
-
-    def replace_tensor_to_optimizer(self, tensor: torch.Tensor, name:str):
+    def replace_tensor_to_optimizer(self, tensor: torch.Tensor, name: str):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
             if group["name"] != name:
@@ -418,7 +418,6 @@ class GaussianModel:
                 del self.optimizer.state[group["params"][0]]
                 group["params"][0] = nn.Parameter(tensor.requires_grad_(True))
                 self.optimizer.state[group["params"][0]] = stored_state
-
             else:
                 group["params"][0] = nn.Parameter(tensor.requires_grad_(True))
 
@@ -477,7 +476,6 @@ class GaussianModel:
     # ------------------------------------------------------------------
     # Prune / densify
     # ------------------------------------------------------------------
-
     def prune_points(self, mask: torch.Tensor):
         valid_points_mask = ~mask
         optimizable_tensors = self._prune_optimizer(valid_points_mask)
@@ -536,7 +534,6 @@ class GaussianModel:
             selected_pts_mask,
             self.get_scaling.max(dim=1).values <= clone_scale_threshold,
         )
-
         if importance_threshold > 0.0:
             selected_pts_mask = torch.logical_and(
                 selected_pts_mask, avg_importance >= importance_threshold
@@ -563,7 +560,7 @@ class GaussianModel:
         split_scale_threshold: float,
         importance_threshold: float = 0.0,
         n_splits: int = 2,
-    )
+    ):
         avg_importance = self.get_avg_importance().squeeze(-1)
         selected_pts_mask = (grads.squeeze(-1) >= grad_threshold)
         selected_pts_mask = torch.logical_and(
@@ -583,7 +580,7 @@ class GaussianModel:
         means = torch.zeros((stds.size(0), 3), device=self.device)
         samples = torch.normal(mean=means, std=stds)
 
-        rots = self.get_rotation[selected_pts_mask].repeat(n_splits,1)
+        rots = self.get_rotation[selected_pts_mask].repeat(n_splits, 1)
         from utils.general_utils import build_rotation  # local import to avoid clutter
         rot_mats = build_rotation(rots)
 
@@ -608,7 +605,7 @@ class GaussianModel:
         prune_filter = torch.cat(
             (
                 selected_pts_mask,
-                torch.zeros(n_splits * n_selected, device = self.device, dtype = torch.bool)
+                torch.zeros(n_splits * n_selected, device=self.device, dtype=torch.bool),
             )
         )
         self.prune_points(prune_filter)
@@ -629,17 +626,17 @@ class GaussianModel:
 
         self.densify_and_clone(
             grads=grads,
-            grad_threshold = max_grad,
-            clone_scale_threshold = clone_scale_threshold,
-            importance_threshold = importance_threshold,
+            grad_threshold=max_grad,
+            clone_scale_threshold=clone_scale_threshold,
+            importance_threshold=importance_threshold,
         )
 
         self.densify_and_split(
-            grads = grads,
-            grad_threshold = max_grad,
-            split_scale_threshold = split_scale_threshold,
-            importance_threshold = importance_threshold,
-            n_splits = n_splits,
+            grads=grads,
+            grad_threshold=max_grad,
+            split_scale_threshold=split_scale_threshold,
+            importance_threshold=importance_threshold,
+            n_splits=n_splits,
         )
 
         prune_mask = (self.get_opacity.squeeze(-1) < min_opacity)
@@ -660,7 +657,7 @@ class GaussianModel:
         new_opacity = self.inverse_opacity_activation(
             torch.minimum(
                 self.get_opacity,
-                torch.full_like(self.get_opacity, max_opacity)
+                torch.full_like(self.get_opacity, max_opacity),
             )
         )
         optimizable = self.replace_tensor_to_optimizer(new_opacity, "opacity")

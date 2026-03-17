@@ -1,28 +1,24 @@
-import torch
+import os
 import sys
 from datetime import datetime
 import numpy as np
 import random
+import torch
 
-def inverse_sigmoid(x):
-    return torch.log(x/(1-x))
+def inverse_sigmoid(x, eps: float = 1e-6):
+    x = torch.clamp(x, eps, 1.0- eps)
+    return torch.log(x/(1.0-x))
+
+def inverse_softplus(y, threshold: float = 20.0):
+    """stable inverse of softplus function"""
+    return torch.where(y > threshold, y, y+torch.log(-torch.expm1(-y)))
 
 def get_expon_lr_func(
     lr_init, lr_final, lr_delay_steps=0, lr_delay_mult=1.0, max_steps=1000000
 ):
     """
     Copied from Plenoxels
-
     Continuous learning rate decay function. Adapted from JaxNeRF
-    The returned rate is lr_init when step=0 and lr_final when step=max_steps, and
-    is log-linearly interpolated elsewhere (equivalent to exponential decay).
-    If lr_delay_steps>0 then the learning rate will be scaled by some smooth
-    function of lr_delay_mult, such that the initial learning rate is
-    lr_init*lr_delay_mult at the beginning of optimization but will be eased back
-    to the normal learning rate when steps>lr_delay_steps.
-    :param conf: config subtree 'lr' or similar
-    :param max_steps: int, the number of steps during optimization.
-    :return HoF which takes step as input
     """
 
     def helper(step):
@@ -43,7 +39,8 @@ def get_expon_lr_func(
     return helper
 
 def strip_lowerdiag(L):
-    uncertainty = torch.zeros((L.shape[0], 6), dtype=torch.float, device="cuda")
+    device = L.device
+    uncertainty = torch.zeros((L.shape[0], 6), dtype=torch.float, device=device)
 
     uncertainty[:, 0] = L[:, 0, 0]
     uncertainty[:, 1] = L[:, 0, 1]
@@ -57,30 +54,33 @@ def strip_symmetric(sym):
     return strip_lowerdiag(sym)
 
 def build_rotation(r):
-    norm = torch.sqrt(r[:,0]*r[:,0] + r[:,1]*r[:,1] + r[:,2]*r[:,2] + r[:,3]*r[:,3])
+    norm = torch.sqrt(torch.clamp(torch.sum(r*r, dim=1), min=1e-12))
 
     q = r / norm[:, None]
 
-    R = torch.zeros((q.size(0), 3, 3), device='cuda')
+    device = r.device
+    R = torch.zeros((q.size(0), 3, 3), device=device, dtype=r.dtype)
 
-    r = q[:, 0]
+    w = q[:, 0]
     x = q[:, 1]
     y = q[:, 2]
     z = q[:, 3]
 
     R[:, 0, 0] = 1 - 2 * (y*y + z*z)
-    R[:, 0, 1] = 2 * (x*y - r*z)
-    R[:, 0, 2] = 2 * (x*z + r*y)
-    R[:, 1, 0] = 2 * (x*y + r*z)
+    R[:, 0, 1] = 2 * (x*y - w*z)
+    R[:, 0, 2] = 2 * (x*z + w*y)
+    R[:, 1, 0] = 2 * (x*y + w*z)
     R[:, 1, 1] = 1 - 2 * (x*x + z*z)
-    R[:, 1, 2] = 2 * (y*z - r*x)
-    R[:, 2, 0] = 2 * (x*z - r*y)
-    R[:, 2, 1] = 2 * (y*z + r*x)
+    R[:, 1, 2] = 2 * (y*z - w*x)
+    R[:, 2, 0] = 2 * (x*z - w*y)
+    R[:, 2, 1] = 2 * (y*z + w*x)
     R[:, 2, 2] = 1 - 2 * (x*x + y*y)
     return R
 
 def build_scaling_rotation(s, r):
-    L = torch.zeros((s.shape[0], 3, 3), dtype=torch.float, device="cuda")
+
+    device = s.device
+    L = torch.zeros((s.shape[0], 3, 3), dtype=s.type, device=device)
     R = build_rotation(r)
 
     L[:,0,0] = s[:,0]
@@ -89,6 +89,30 @@ def build_scaling_rotation(s, r):
 
     L = R @ L
     return L
+
+def build_covariance_from_scaling_rotation(
+    scaling,
+    scaling_modifier,
+    rotation,
+    return_strip: bool = False,
+    ):
+    """
+    scaling: (N,3), expected to be positive
+    rotation: (N,4), quaternion
+    returns:
+    - (N,3,3) covariance matrix if return_strip is False
+    - (N,6) upper/lower symmetric packed form if return_strip is True
+    """
+
+    L = build_scaling_rotation(scaling_modifier * scaling, rotation)
+    actual_covariance = L @ L.transpose(1,2)
+    if return_strip:
+        return strip_symmetric(actual_covariance)
+    return actual_covariance
+
+def mkdir_p(path: str):
+    if path:
+        os.makedirs(path, exist_ok=True)
 
 def safe_state(silent):
     old_f = sys.stdout
@@ -107,5 +131,11 @@ def safe_state(silent):
             old_f.flush()
 
     sys.stdout = F(silent)
+
+    random.seed(0)
+    np.random.seed(0)
+    torch.manual_seed(0)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(0)
 
     # torch.cuda.set_device(torch.device("cuda:0"))
