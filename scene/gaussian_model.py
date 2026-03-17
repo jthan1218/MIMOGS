@@ -563,7 +563,7 @@ class GaussianModel:
         split_scale_threshold: float,
         importance_threshold: float = 0.0,
         n_splits: int = 2,
-    )
+    ):
         avg_importance = self.get_avg_importance().squeeze(-1)
         selected_pts_mask = (grads.squeeze(-1) >= grad_threshold)
         selected_pts_mask = torch.logical_and(
