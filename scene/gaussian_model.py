@@ -34,7 +34,7 @@ class GaussianModel:
         target_gaussians: int = 50_000,
         optimizer_type: str = "default",
         device: str = "cuda",
-        init_range: float = 10.0,
+        init_range: float = 5.0,
     ):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.optimizer_type = optimizer_type
