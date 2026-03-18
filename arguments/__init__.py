@@ -51,7 +51,7 @@ class ModelParams(ParamGroup):
     """
 
     def __init__(self, parser: ArgumentParser, sentinel: bool = False):
-        self._source_path = ""
+        self._source_path = "./dataset/asu_campus_4by16_outdoor"
         self._model_path = ""
         self.data_device = "cuda"
         self.eval = False
@@ -66,7 +66,7 @@ class ModelParams(ParamGroup):
         self.complex_gain_mode = "magphase"
 
         self.use_geometric_phase = False
-        self.carrier_frequency = 0.0
+        self.carrier_frequency_hz = 0.0
 
         super().__init__(parser, "Model Parameters", sentinel)
 
@@ -94,7 +94,7 @@ class OptimizationParams(ParamGroup):
 
         self.opacity_lr = 0.025
         self.scaling_lr = 0.005
-        self.lotation_lr = 0.001
+        self.rotation_lr = 0.001
         self.optimizer_type = "default"
 
         self.gain_lr = 0.0025

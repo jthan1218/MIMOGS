@@ -1,6 +1,5 @@
 import math
 import os
-from tokenize import Floatnumber
 
 import numpy as np
 import scipy.io as sio
@@ -109,7 +108,7 @@ class GaussianModel:
 
     def get_covariance(self, scaling_modifier: float = 1.0):
         return self.covariance_activation(
-            self.get_scaling, scaling_modifier, self.get_rotation, return_strip = True
+            self.get_scaling, scaling_modifier, self.get_rotation, return_strip = False
         )
 
     # ------------------------------------------------------------------
@@ -343,7 +342,7 @@ class GaussianModel:
         attributes = np.concatenate(
             [xyz, normals, opacities, scales, rotations, gain_mag, gain_phase], axis = 1
         )
-        elements[:] = list[tuple](map[tuple](tuple, attributes))
+        elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, "vertex")
         PlyData([el]).write(path)
 
@@ -364,13 +363,13 @@ class GaussianModel:
         scale_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("scale_")]
         scale_names = sorted(scale_names, key=lambda x: int(x.split("_")[-1]))
         scales = np.zeros((xyz.shape[0], len(scale_names)), dtype=np.float32)
-        for idx, attr_name in enumerate[Any](scale_names):
+        for idx, attr_name in enumerate(scale_names):
             scales[:, idx] = np.asarray(plydata.elements[0][attr_name])
 
         rot_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("rot_")]
         rot_names = sorted(rot_names, key=lambda x: int(x.split("_")[-1]))
         rots = np.zeros((xyz.shape[0], len(rot_names)), dtype=np.float32)
-        for idx, attr_name in enumerate[Any](rot_names):
+        for idx, attr_name in enumerate(rot_names):
             rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
 
         gain_mag = np.asarray(plydata.elements[0]["gain_mag"])[..., np.newaxis]

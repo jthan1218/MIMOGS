@@ -1,5 +1,4 @@
 import math
-from symbol import break_stmt
 from typing import Dict, Tuple, Optional
 
 import torch
@@ -181,7 +180,7 @@ def _apply_geometric_phase(
     wavelength = c0 / carrier_frequency_hz
 
     d_tx = torch.norm(means - tx_pos.unsqueeze(0), dim=-1, keepdim=True)
-    d_rx = torch.norm(means = rx_pos.unsqueeze(0), dim=-1, keepdim=True)
+    d_rx = torch.norm(means - rx_pos.unsqueeze(0), dim=-1, keepdim=True)
     path_length = d_tx + d_rx
 
     phase = -2.0 * math.pi * path_length / wavelength
@@ -191,12 +190,12 @@ def _apply_geometric_phase(
 
 def render(
     rx_pos: torch.Tensor,
-    tx_pos: torch.Tensors,
+    tx_pos: torch.Tensor,
     pc: GaussianModel,
     rx_shape: Tuple[int, int] = (2, 2),     # (horizontal, vertical)
     tx_shape: Tuple[int, int] = (4, 4),     # (horizontal, vertical)
     scaling_modifier: float = 1.0,
-    use_geometric_phase: bool = True,
+    use_geometric_phase: bool = False,
     carrier_frequency_hz: float = 0.0,
     normalize_beam_weights: bool = True,
     covariance_floor: float = 1e-6,
@@ -305,7 +304,7 @@ def render(
     # H_n[p,q] = c_n * r_n[p] * t_n[q]
     # ------------------------------------------------------------------ 
     beam_contributions = (
-        complex_weight[:, None, None]
+        complex_weight.view(-1, 1, 1)
         * rx_weights[:, :, None].to(complex_weight.dtype)
         * tx_weights[:, None, :].to(complex_weight.dtype)
     ) # (N, Nr, Nt)
@@ -321,6 +320,6 @@ def render(
         "phase": torch.angle(H),
         "rx_weights": rx_weights,
         "tx_weights": tx_weights,
-        "per_Gaussian_importance": per_gaussian_importance,
+        "per_gaussian_importance": per_gaussian_importance,
         "beam_contributions": beam_contributions,
     }

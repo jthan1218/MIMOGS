@@ -1,4 +1,3 @@
-from ast import NodeTransformer
 import os
 import yaml
 
@@ -32,14 +31,14 @@ class Scene:
         - provide train/test iterators
         """
 
-        self.model_path = args._model_path
+        self.model_path = args.model_path
         self.loaded_iter = None
         self.gaussians = gaussians
 
         self.batch_size = 1
         self.num_epochs = 30
 
-        self.datadir = os.path.abspath("./dataset/asu_campus_4by16_outdoor")
+        self.datadir = os.path.abspath(args.source_path)
 
         self.beam_rows = 4
         self.beam_cols = 16
