@@ -12,14 +12,207 @@ from arguments import ModelParams, OptimizationParams, get_combined_args
 from gaussian_renderer import render
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state
+from torch.utils.data import DataLoader, Subset
 
 
-def complex_mse_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    return torch.mean(torch.abs(pred - target) ** 2)
+def magnitude_mse_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    return torch.mean((pred - target) ** 2)
 
 
-def wrapped_to_pi(x: torch.Tensor) -> torch.Tensor:
-    return torch.atan2(torch.sin(x), torch.cos(x))
+def normalized_magnitude_mse_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    eps: float = 1e-5,
+) -> torch.Tensor:
+    abs_loss = magnitude_mse_loss(pred, target)
+    target_power = torch.mean(target ** 2)
+    return abs_loss / (target_power + eps)
+
+
+def log_magnitude_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mag_scale: float = 1e-3,
+) -> torch.Tensor:
+    pred_log = torch.log1p(pred / mag_scale)
+    target_log = torch.log1p(target / mag_scale)
+    return torch.mean((pred_log - target_log) ** 2)
+
+
+def hybrid_magnitude_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    alpha: float = 0.2,
+    beta: float = 0.3,
+    gamma: float = 0.5,
+    eps: float = 1e-4,
+    mag_scale: float = 1e-3,
+    return_terms: bool = False,
+):
+    abs_loss = magnitude_mse_loss(pred, target)
+    rel_loss = normalized_magnitude_mse_loss(pred, target, eps=eps)
+    log_loss = log_magnitude_loss(pred, target, mag_scale=mag_scale)
+
+    total_loss = alpha * abs_loss + beta * rel_loss + gamma * log_loss
+
+    if return_terms:
+        target_power = torch.mean(target ** 2)
+        return total_loss, abs_loss.detach(), rel_loss.detach(), log_loss.detach(), target_power.detach()
+
+    return total_loss
+
+def tail_sample_weight(
+    target_mag: torch.Tensor,
+    power_ref: float = 1e-4,
+    max_weight: float = 3.0,
+    eps: float = 1e-12,
+):
+    sample_power = torch.mean(target_mag ** 2).detach()
+    w = torch.sqrt(torch.tensor(power_ref, device=target_mag.device) / (sample_power + eps))
+    w = torch.clamp(w, min=1.0, max=max_weight)
+    return w
+
+# def collect_hard_example_indices(
+#     scene,
+#     gaussians,
+#     tx_pos,
+#     device,
+#     fraction: float = 0.2,
+#     min_count: int = 512,
+#     max_count: int = 2048,
+# ):
+#     """
+#     Evaluate the whole TRAIN set once, rank samples by ratio_to_zero,
+#     and return the hardest indices.
+#     """
+#     rows = []
+
+#     with torch.no_grad():
+#         for idx in range(len(scene.train_set)):
+#             magnitude, rx_pos = scene.train_set[idx]
+
+#             gt_mag = magnitude.to(device).reshape(scene.beam_rows, scene.beam_cols)
+#             rx_pos = rx_pos.to(device)
+
+#             out = render(
+#                 rx_pos=rx_pos,
+#                 tx_pos=tx_pos,
+#                 pc=gaussians,
+#                 rx_shape=(2, 2),
+#                 tx_shape=(4, 4),
+#                 normalize_beam_weights=False,
+#                 weight_floor=0.0,
+#             )
+#             pred_mag = out["render"]
+
+#             loss_val = magnitude_mse_loss(pred_mag, gt_mag).item()
+#             zero_val = torch.mean(gt_mag ** 2).item()
+#             ratio_val = loss_val / max(zero_val, 1e-12)
+
+#             rows.append({
+#                 "idx": idx,
+#                 "loss": loss_val,
+#                 "zero": zero_val,
+#                 "ratio_to_zero": ratio_val,
+#             })
+
+#     rows.sort(key=lambda r: r["ratio_to_zero"], reverse=True)
+
+#     k = int(len(rows) * fraction)
+#     k = max(k, min_count)
+#     k = min(k, max_count, len(rows))
+
+#     hard_indices = [r["idx"] for r in rows[:k]]
+#     return hard_indices, rows
+
+
+# def run_hard_example_finetune(
+#     scene,
+#     gaussians,
+#     tx_pos,
+#     device,
+#     model_params,
+#     iteration: int,
+#     hard_indices,
+#     hard_epochs: int = 5,
+#     lr_mult: float = 0.3,
+# ):
+#     """
+#     Fine-tune only on hardest TRAIN samples for a few epochs.
+#     Uses the same loss as the main training loop.
+#     """
+#     if len(hard_indices) == 0:
+#         return iteration
+
+#     hard_set = Subset(scene.train_set, hard_indices)
+#     hard_loader = DataLoader(
+#         hard_set,
+#         batch_size=1,
+#         shuffle=True,
+#         num_workers=0,
+#     )
+
+#     # save current learning rates
+#     old_lrs = [pg["lr"] for pg in gaussians.optimizer.param_groups]
+#     for pg in gaussians.optimizer.param_groups:
+#         pg["lr"] = pg["lr"] * lr_mult
+
+#     hard_total_iters = len(hard_loader) * hard_epochs
+#     progress_bar = tqdm(total=hard_total_iters, desc="Hard-example fine-tune")
+#     ema_loss = 0.0
+
+#     for _ in range(hard_epochs):
+#         for batch in hard_loader:
+#             iteration += 1
+#             gaussians.update_learning_rate(iteration)
+
+#             magnitude, rx_pos = batch
+
+#             magnitude = magnitude.squeeze(0).to(device)
+#             rx_pos = rx_pos.squeeze(0).to(device)
+
+#             gt_mag = magnitude.reshape(scene.beam_rows, scene.beam_cols)
+
+#             out = render(
+#                 rx_pos=rx_pos,
+#                 tx_pos=tx_pos,
+#                 pc=gaussians,
+#                 rx_shape=(2, 2),
+#                 tx_shape=(4, 4),
+#                 normalize_beam_weights=False,
+#                 weight_floor=0.0,
+#             )
+
+#             pred_mag = out["render"]
+#             importance = out["per_gaussian_importance"]
+
+#             loss, abs_loss_dbg, rel_loss_dbg, log_loss_dbg, gt_power_dbg = hybrid_magnitude_loss(
+#                 pred_mag,
+#                 gt_mag,
+#                 alpha=0.2,
+#                 beta=0.3,
+#                 gamma=0.5,
+#                 eps=1e-4,
+#                 mag_scale=1e-3,
+#                 return_terms=True,
+#             )
+
+#             gaussians.optimizer.zero_grad(set_to_none=True)
+#             loss.backward()
+#             gaussians.accumulate_training_stats(importance=importance)
+#             gaussians.optimizer.step()
+
+#             ema_loss = 0.4 * float(loss.item()) + 0.6 * ema_loss
+#             progress_bar.set_postfix({"Loss": f"{ema_loss:.8f}"})
+#             progress_bar.update(1)
+
+#     progress_bar.close()
+
+#     # restore original learning rates
+#     for pg, old_lr in zip(gaussians.optimizer.param_groups, old_lrs):
+#         pg["lr"] = old_lr
+
+#     return iteration
 
 
 def prepare_output_dir(model_path: str):
@@ -59,7 +252,8 @@ def evaluate_and_save_random_test_samples(
 
     total = len(scene.test_set)
     num_samples = min(num_samples, total)
-    indices = random.sample(range(total), num_samples)
+    rng = random.Random(12345)
+    indices = rng.sample(range(total), num_samples)
 
     tx_pos = torch.tensor(
         scene.bs_position,
@@ -71,58 +265,41 @@ def evaluate_and_save_random_test_samples(
 
     with torch.no_grad():
         for rank, idx in enumerate(indices):
-            magnitude, phases, rx_pos = scene.test_set[idx]
+            magnitude, rx_pos = scene.test_set[idx]
 
             rx_pos = rx_pos.to(gaussians.get_xyz.device)
             magnitude = magnitude.to(gaussians.get_xyz.device)
-            phases = phases.to(gaussians.get_xyz.device)
-
             magnitude = magnitude.reshape(scene.beam_rows, scene.beam_cols)
-            phases = phases.reshape(scene.beam_rows, scene.beam_cols)
 
             out = render(
-                rx_pos = rx_pos,
-                tx_pos = tx_pos,
-                pc = gaussians,
-                rx_shape = (2, 2),
-                tx_shape = (4, 4),
-                use_geometric_phase=model_params.use_geometric_phase,
-                carrier_frequency_hz = model_params.carrier_frequency_hz,
+                rx_pos=rx_pos,
+                tx_pos=tx_pos,
+                pc=gaussians,
+                rx_shape=(2, 2),
+                tx_shape=(4, 4),
+                normalize_beam_weights=False,
+                weight_floor=0.0,
             )
 
-            pred_H = out["render"]
-            pred_mag = torch.abs(pred_H)
-            pred_phase = torch.angle(pred_H)
+            pred_mag = out["render"]
 
             gt_mag_np = magnitude.detach().cpu().numpy()
             pred_mag_np = pred_mag.detach().cpu().numpy()
 
-            # GT phase is assumed to be in [0, 2pi), but pred phase is from angle() in (-pi, pi]
-            # Wrap GT for visually consistent comparison
-            gt_phase_wrapped = wrapped_to_pi(phases).detach().cpu().numpy()
-            pred_phase_np = pred_phase.detach().cpu().numpy()
+            fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
-            fig, axes = plt.subplots(2, 2, figsize=(10, 5))
+            im0 = axes[0].imshow(gt_mag_np, aspect="equal", interpolation="nearest")
+            axes[0].set_title("Ground Truth Magnitude")
+            plt.colorbar(im0, ax=axes[0], fraction=0.03, pad=0.04)
 
-            im0 = axes[0, 0].imshow(gt_mag_np, aspect="auto")
-            axes[0, 0].set_title("Ground Truth Magnitude")
-            plt.colorbar(im0, ax=axes[0, 0], fraction=0.046, pad=0.04)
-
-            im1 = axes[0, 1].imshow(pred_mag_np, aspect="auto")
-            axes[0, 1].set_title("Predicted Magnitude")
-            plt.colorbar(im1, ax=axes[0, 1], fraction=0.046, pad=0.04)
-
-            im2 = axes[1, 0].imshow(gt_phase_wrapped, aspect="auto", vmin=-np.pi, vmax=np.pi)
-            axes[1, 0].set_title("Ground Truth Phase")
-            plt.colorbar(im2, ax=axes[1, 0], fraction=0.046, pad=0.04)
-
-            im3 = axes[1, 1].imshow(pred_phase_np, aspect="auto", vmin=-np.pi, vmax=np.pi)
-            axes[1, 1].set_title("Predicted Phase")
-            plt.colorbar(im3, ax=axes[1, 1], fraction=0.046, pad=0.04)
+            im1 = axes[1].imshow(pred_mag_np, aspect="equal", interpolation="nearest")
+            axes[1].set_title("Predicted Magnitude")
+            plt.colorbar(im1, ax=axes[1], fraction=0.03, pad=0.04)
 
             for ax in axes.ravel():
                 ax.set_xlabel("Tx beam index")
                 ax.set_ylabel("Rx beam index")
+                ax.set_aspect("equal")
 
             fig.suptitle(f"Test sample idx={idx}", fontsize=12)
             fig.tight_layout()
@@ -133,6 +310,43 @@ def evaluate_and_save_random_test_samples(
 
     print(f"[Eval] Saved comparison figures to {save_dir}")
 
+def get_avg_opacity(gaussians) -> float:
+    with torch.no_grad():
+        if hasattr(gaussians, "get_opacity"):
+            opacity = gaussians.get_opacity
+        elif hasattr(gaussians, "_opacity"):
+            opacity = torch.sigmoid(gaussians._opacity)
+        elif hasattr(gaussians, "opacity"):
+            opacity = gaussians.opacity
+        else:
+            return float("nan")
+
+        if torch.is_complex(opacity):
+            opacity = torch.abs(opacity)
+
+        return float(opacity.detach().mean().item())
+
+def _finite_ratio(x: torch.Tensor) -> float:
+    if torch.is_complex(x):
+        xr = torch.view_as_real(x.detach())
+    else:
+        xr = x.detach()
+    return float(torch.isfinite(xr).float().mean().item())
+
+def assert_finite(name: str, x: torch.Tensor, iteration: int):
+    xr = torch.view_as_real(x) if torch.is_complex(x) else x
+    if not torch.isfinite(xr).all():
+        raise RuntimeError(
+            f"[NaN/Inf detected] {name} at iter={iteration}, "
+            f"finite_ratio={_finite_ratio(x):.6f}, "
+            f"shape={tuple(x.shape)}, dtype={x.dtype}, device={x.device}"
+        )
+
+
+
+########################################################
+# Training loop
+########################################################
 def training(model_params, opt_params, raw_args):
     device = torch.device(model_params.data_device if torch.cuda.is_available() else "cpu")
 
@@ -143,13 +357,31 @@ def training(model_params, opt_params, raw_args):
     save_run_args_txt(model_params.model_path, model_params, opt_params, raw_args)
 
     gaussians = GaussianModel(
-        target_gaussians = 50_000,
+        target_gaussians = 15_000,
         optimizer_type = opt_params.optimizer_type,
         device = str(device),
-        init_range = 5.0,
+        init_range = 1,
     )
 
     scene = Scene(model_params, gaussians)
+
+    # --------------------------------------------------
+    # Debug: overfit fixed 16 train samples
+    # --------------------------------------------------
+    fixed_subset_debug = False
+    fixed_indices = list(range(256))
+
+    if fixed_subset_debug:
+        subset = Subset(scene.train_set, fixed_indices)
+        scene.train_iter = DataLoader(
+            subset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=0,
+        )
+        scene.num_epochs = 1000
+    ########################################################
+
 
     if getattr(model_params, "init_mode", "random") == "vertices" and getattr(model_params, "vertices_path",""):
         gaussians.gaussian_init(vertices_path=model_params.vertices_path)
@@ -163,6 +395,58 @@ def training(model_params, opt_params, raw_args):
         dtype=torch.float32,
         device = device,
     )
+
+    # --------------------------------------------------
+    # Debug: fixed-subset overfit diagnostics
+    # --------------------------------------------------
+    debug_fixed_subset = True
+    debug_indices = fixed_indices if debug_fixed_subset else [0]
+
+    def compute_subset_debug_stats(indices):
+        rows = []
+
+        with torch.no_grad():
+            for idx in indices:
+                dbg_mag, dbg_rx = scene.train_set[idx]
+                dbg_mag = dbg_mag.to(device).reshape(scene.beam_rows, scene.beam_cols)
+                dbg_rx = dbg_rx.to(device)
+
+                dbg_gt_mag = dbg_mag
+
+                dbg_out = render(
+                    rx_pos=dbg_rx,
+                    tx_pos=tx_pos,
+                    pc=gaussians,
+                    rx_shape=(2, 2),
+                    tx_shape=(4, 4),
+                    normalize_beam_weights=False,
+                    weight_floor=0.0,
+                )
+                dbg_pred_mag = dbg_out["render"]
+
+                loss_val = magnitude_mse_loss(dbg_pred_mag, dbg_gt_mag).item()
+                zero_val = torch.mean(dbg_gt_mag ** 2).item()
+                ratio_val = loss_val / max(zero_val, 1e-12)
+
+                rows.append({
+                    "idx": idx,
+                    "loss": loss_val,
+                    "zero": zero_val,
+                    "ratio_to_zero": ratio_val,
+                })
+
+        mean_loss = sum(r["loss"] for r in rows) / len(rows)
+        mean_zero = sum(r["zero"] for r in rows) / len(rows)
+        mean_ratio = sum(r["ratio_to_zero"] for r in rows) / len(rows)
+
+        return rows, mean_loss, mean_zero, mean_ratio
+
+    init_rows, init_loss, zero_loss, init_ratio = compute_subset_debug_stats(debug_indices)
+
+    print(f"[Debug] subset mean init loss: {init_loss:.8f}")
+    print(f"[Debug] subset mean zero baseline: {zero_loss:.8f}")
+    print(f"[Debug] subset mean init ratio_to_zero: {init_ratio:.8f}")
+    ########################################################
 
     num_epochs = scene.num_epochs
     total_iterations = len(scene.train_iter) * num_epochs
@@ -183,31 +467,49 @@ def training(model_params, opt_params, raw_args):
             iteration += 1
             gaussians.update_learning_rate(iteration)
 
-            magnitude, phases, rx_pos = batch
+            magnitude, rx_pos = batch
 
             magnitude = magnitude.squeeze(0).to(device)
-            phases = phases.squeeze(0).to(device)
             rx_pos = rx_pos.squeeze(0).to(device)
 
-            magnitude = magnitude.reshape(scene.beam_rows, scene.beam_cols)
-            phases = phases.reshape(scene.beam_rows, scene.beam_cols)
+            gt_mag = magnitude.reshape(scene.beam_rows, scene.beam_cols)
 
-            gt_H = torch.polar(magnitude, phases)
+            assert_finite("magnitude", magnitude, iteration)
+            assert_finite("rx_pos", rx_pos, iteration)
 
             out = render(
-                rx_pos = rx_pos,
-                tx_pos = tx_pos,
-                pc = gaussians,
-                rx_shape = (2, 2),
-                tx_shape = (4, 4),
-                use_geometric_phase=model_params.use_geometric_phase,
-                carrier_frequency_hz = model_params.carrier_frequency_hz,
+                rx_pos=rx_pos,
+                tx_pos=tx_pos,
+                pc=gaussians,
+                rx_shape=(2, 2),
+                tx_shape=(4, 4),
+                normalize_beam_weights=False,
+                weight_floor=0.0,
             )
+            pred_mag = out["render"]
 
-            pred_H = out["render"]
             importance = out["per_gaussian_importance"]
 
-            loss = complex_mse_loss(pred_H, gt_H)
+            assert_finite("importance", importance, iteration)
+
+            loss, abs_loss_dbg, rel_loss_dbg, log_loss_dbg, gt_power_dbg = hybrid_magnitude_loss(
+                pred_mag,
+                gt_mag,
+                alpha=0.2,
+                beta=0.3,
+                gamma=0.5,
+                eps=1e-4,
+                mag_scale=1e-3,
+                return_terms=True,
+            )
+            assert_finite("loss", loss, iteration)
+
+            # tail_w = tail_sample_weight(
+            #     gt_mag,
+            #     power_ref=1e-4,
+            #     max_weight=3.0,
+            # )
+            # loss = loss * tail_w
 
             gaussians.optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -215,30 +517,88 @@ def training(model_params, opt_params, raw_args):
             gaussians.optimizer.step()
 
 
-            if iteration > 1000 and iteration < 15000 and iteration % 1000 == 0:
+            # Densify and prune OFF FOR DEBUGGING
+            # if iteration > 1000 and iteration < 15000 and iteration % 1000 == 0:
+            #     with torch.no_grad():
+            #         gaussians.densify_and_prune(
+            #             max_grad = 1e-4,
+            #             min_opacity = 1e-3,
+            #             min_gain_mag = 1e-4,
+            #             clone_scale_threshold=0.05,
+            #             split_scale_threshold=0.20,
+            #             importance_threshold=0.0,
+            #             max_scale = None,
+            #             n_splits = 2,
+            #         )
+            
+            if iteration > 1000 and iteration % 1000 == 0:
                 with torch.no_grad():
-                    gaussians.densify_and_prune(
-                        max_grad = 1e-4,
-                        min_opacity = 1e-3,
-                        min_gain_mag = 1e-4,
-                        clone_scale_threshold=0.05,
-                        split_scale_threshold=0.20,
-                        importance_threshold=0.0,
-                        max_scale = None,
-                        n_splits = 2,
+                    print(
+                        f"grad xyz={gaussians._xyz.grad.norm().item():.3e}, "
+                        f"opacity={gaussians._opacity.grad.norm().item():.3e}, "
+                        f"scaling={gaussians._scaling.grad.norm().item():.3e}, "
+                        f"rotation={gaussians._rotation.grad.norm().item():.3e}, "
+                        f"gain_mag={gaussians._gain_mag.grad.norm().item():.3e}, "
                     )
 
+            if iteration > 0 and iteration % 1000 == 0:
+                avg_opacity = get_avg_opacity(gaussians)
+                print(
+                    f"nums of gaussians: {gaussians.get_xyz.shape[0]}, "
+                    f"Avg opacity: {avg_opacity:.4f}, "
+                    f"abs_loss: {float(abs_loss_dbg):.8f}, "
+                    f"rel_loss: {float(rel_loss_dbg):.8f}, "
+                    f"log_loss: {float(log_loss_dbg):.8f}, "
+                    f"gt_power: {float(gt_power_dbg):.8f}"
+                )
+
             ema_loss = 0.4 * loss.item() + 0.6 * ema_loss
-            progress_bar.set_postfix(
-                {
-                    "Loss": f"{ema_loss:.6e}",
-                    "Num Gaussians": int(gaussians.get_xyz.shape[0]),
-                }
-            )
-            progress_bar.update(1)
+            if iteration % 10 == 0:
+                progress_bar.set_postfix(
+                    {
+                        "Loss": f"{ema_loss:.8f}"
+                    }
+                )
+                progress_bar.update(10)
 
     progress_bar.close()
 
+    # --------------------------------------------------
+    # Debug: fixed-subset overfit diagnostics (final)
+    # --------------------------------------------------
+    final_rows, final_loss, final_zero, final_ratio = compute_subset_debug_stats(debug_indices)
+
+    print(f"[Debug] subset mean final loss: {final_loss:.8f}")
+    print(f"[Debug] loss ratio final/init: {final_loss / max(init_loss, 1e-12):.8f}")
+    print(f"[Debug] loss ratio final/zero: {final_loss / max(zero_loss, 1e-12):.8f}")
+    print(f"[Debug] subset mean final ratio_to_zero: {final_ratio:.8f}")
+
+    # --------------------------------------------------
+    # Save per-sample debug distribution
+    # --------------------------------------------------
+    debug_csv_path = os.path.join(model_params.model_path, "debug_subset_losses.csv")
+    with open(debug_csv_path, "w") as f:
+        f.write("idx,init_loss,final_loss,zero_loss,init_ratio_to_zero,final_ratio_to_zero\n")
+        for r0, rT in zip(init_rows, final_rows):
+            f.write(
+                f"{r0['idx']},"
+                f"{r0['loss']:.8f},"
+                f"{rT['loss']:.8f},"
+                f"{rT['zero']:.8f},"
+                f"{r0['ratio_to_zero']:.8f},"
+                f"{rT['ratio_to_zero']:.8f}\n"
+            )
+
+    final_ratios = [r["ratio_to_zero"] for r in final_rows]
+    final_ratios_sorted = sorted(final_ratios)
+
+    print(f"[Debug] per-sample final ratio_to_zero min: {final_ratios_sorted[0]:.8f}")
+    print(f"[Debug] per-sample final ratio_to_zero median: {final_ratios_sorted[len(final_ratios_sorted)//2]:.8f}")
+    print(f"[Debug] per-sample final ratio_to_zero max: {final_ratios_sorted[-1]:.8f}")
+    print(f"[Debug] saved per-sample debug csv to: {debug_csv_path}")
+    ########################################################
+
+    # --------------------------------------------------
     # Final save
     point_cloud_path = os.path.join(model_params.model_path, "point_cloud", "point_cloud.ply")
     gaussians.save_ply(point_cloud_path)

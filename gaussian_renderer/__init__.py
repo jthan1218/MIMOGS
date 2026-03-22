@@ -5,14 +5,23 @@ import torch
 
 from scene.gaussian_model import GaussianModel
 
+
 def _ensure_pos_shape(x: torch.Tensor) -> torch.Tensor:
     """Accepts shape (3,) or (1,3), returns shape (3,)"""
 
-    if x.ndim() == 2 and x.shape[0] == 1:
+    if x.dim() == 2 and x.shape[0] == 1:
         x = x.squeeze(0)
     if x.dim() != 1 or x.shape[0] != 3:
         raise ValueError(f"Position must have shape (3,) or (1,3), got {tuple(x.shape)}")
     return x
+
+def _assert_finite_local(name: str, x: torch.Tensor):
+    xr = torch.view_as_real(x) if torch.is_complex(x) else x
+    if not torch.isfinite(xr).all():
+        raise RuntimeError(f"[render NaN/Inf] {name}")
+
+def _symmetrize(mat: torch.Tensor) -> torch.Tensor:
+    return 0.5 * (mat + mat.transpose(-1, -2))
 
 def _build_dft_uv_bins(num_elem: int, device, dtype) -> torch.Tensor:
     """
@@ -115,9 +124,18 @@ def _projected_angular_covariance(
 
     device = means.device
     dtype = means.dtype
+    N = means.shape[0]
+    _assert_finite_local("means", means)
+    _assert_finite_local("covariances", covariances)
+    _assert_finite_local("array_pos", array_pos)
 
     unit_dir, dist = _direction_and_distance(means, array_pos)      # (N,3), (N,1)
     uv_mean = _uv_from_unit_direction(unit_dir)                     # (N,2)
+
+    _assert_finite_local("unit_dir", unit_dir)
+    _assert_finite_local("dist", dist)
+    _assert_finite_local("uv_mean", uv_mean)
+
 
     # Jacobian of normalized vector: J = (I - uu^T) / ||r||
     eye3 = torch.eye(3, device = device, dtype = dtype).unsqueeze(0).expand(means.shape[0], -1, -1)
@@ -126,67 +144,71 @@ def _projected_angular_covariance(
 
     # uv = [unit_dir_y, unit_dir_z], so keep rows 1 and 2
     J_uv = J_unit[:, 1:3, :]                                       # (N,2,3)
+    _assert_finite_local("J_uv", J_uv)
 
     cov_uv = J_uv @ covariances @ J_uv.transpose(-1, -2)           # (N,2,2)
+    cov_uv = _symmetrize(cov_uv)
 
     eye2 = torch.eye(2, device=device, dtype=dtype).unsqueeze(0).expand(means.shape[0], -1, -1)
     cov_uv = cov_uv + covariance_floor * eye2
     
+    _assert_finite_local("cov_uv", cov_uv)
     return uv_mean, cov_uv, dist
 
+def _safe_inv_cov_2x2(
+    cov_uv: torch.Tensor,
+    eig_floor: float = 1e-4,
+) -> torch.Tensor:
+    """
+    Stable inverse for symmetric 2x2 covariance matrices using eigendecomposition.
+    """
+    cov_uv = _symmetrize(cov_uv)
+    eigvals, eigvecs = torch.linalg.eigh(cov_uv)  # eigvals ascending
+
+    _assert_finite_local("cov_uv_eigvals", eigvals)
+    _assert_finite_local("cov_uv_eigvecs", eigvecs)
+
+    eigvals = torch.clamp(eigvals, min=eig_floor)
+    inv_eigvals = 1.0 / eigvals
+    inv_cov_uv = eigvecs @ torch.diag_embed(inv_eigvals) @ eigvecs.transpose(-1, -2)
+    inv_cov_uv = _symmetrize(inv_cov_uv)
+
+    _assert_finite_local("inv_cov_uv", inv_cov_uv)
+    return inv_cov_uv
 
 def _gaussian_beam_weights_from_uv(
-    uv_mean: torch.Tensor,          # (N,2)
-    cov_uv: torch.Tensor,           # (N,2,2)
-    beam_centers_uv: torch.Tensor,  # (B,2)
+    uv_mean: torch.Tensor,
+    cov_uv: torch.Tensor,
+    beam_centers_uv: torch.Tensor,
     normalize: bool = True,
-    weight_floor: float = 1e-12,
+    weight_floor: float = 0.0,
+    eig_floor: float = 1e-4,
 ) -> torch.Tensor:
-    f"""
-    Soft projection of 3D Gaussian onto beam-domiain grid.
+    _assert_finite_local("uv_mean", uv_mean)
+    _assert_finite_local("cov_uv_input", cov_uv)
+    _assert_finite_local("beam_centers_uv", beam_centers_uv)
 
-    weight_n[b] = exp(-0.5 * (c-b - mu_n)^T Sigma_n^{-1} (c-b - mu_n))
+    delta = beam_centers_uv.unsqueeze(0) - uv_mean.unsqueeze(1)
+    _assert_finite_local("delta", delta)
 
-    If normalize = True, weights are normalized to sum to 1 across beams for each Gaussian.
-    This lets covariance control spread, while gain/opacity controls total magnitude.m
-    """
+    inv_cov_uv = _safe_inv_cov_2x2(cov_uv, eig_floor=eig_floor)
 
-    delta = beam_centers_uv.unsqueeze(0) - uv_mean.unsqueeze(1)     # (N,B,2)
-    inv_cov_uv = torch.linalg.inv(cov_uv)                           # (N,2,2)
+    mahal = torch.einsum("nbi,nij,nbj->nb", delta, inv_cov_uv, delta)
+    _assert_finite_local("mahal", mahal)
 
-    mahal = torch.einsum("nbi,nij,nbj->nb", delta, inv_cov_uv, delta) # (N,B)
-    weights = torch.exp(-0.5 * mahal)
+    log_weights = torch.clamp(-0.5 * mahal, min=-80.0, max=0.0)
+    weights = torch.exp(log_weights)
 
-    weights = torch.where(weights < weight_floor, torch.zeros_like(weights), weights)
+    if weight_floor > 0.0:
+        weights = torch.where(weights < weight_floor, torch.zeros_like(weights), weights)
 
     if normalize:
         denom = weights.sum(dim=-1, keepdim=True).clamp(min=1e-12)
         weights = weights / denom
 
+    _assert_finite_local("weights", weights)
     return weights
 
-def _apply_geometric_phase(
-    complex_weight: torch.Tensor, # (N,1) complex
-    means: torch.Tensor,          # (N,3)
-    tx_pos: torch.Tensor,         # (3,)
-    rx_pos: torch.Tensor,
-    carrier_frequency_hz: float,
-) -> torch.Tensor:
-    """
-    Optional bistatic propagation phase:
-        exp(-j 2pi / lambda * (||mu - tx|| + ||mu - rx||))
-    """
-    c0 = 299_792_458.0 # m/s
-    wavelength = c0 / carrier_frequency_hz
-
-    d_tx = torch.norm(means - tx_pos.unsqueeze(0), dim=-1, keepdim=True)
-    d_rx = torch.norm(means - rx_pos.unsqueeze(0), dim=-1, keepdim=True)
-    path_length = d_tx + d_rx
-
-    phase = -2.0 * math.pi * path_length / wavelength
-    geom = torch.exp(1j * phase)
-
-    return complex_weight * geom
 
 def render(
     rx_pos: torch.Tensor,
@@ -195,11 +217,9 @@ def render(
     rx_shape: Tuple[int, int] = (2, 2),     # (horizontal, vertical)
     tx_shape: Tuple[int, int] = (4, 4),     # (horizontal, vertical)
     scaling_modifier: float = 1.0,
-    use_geometric_phase: bool = False,
-    carrier_frequency_hz: float = 0.0,
     normalize_beam_weights: bool = True,
-    covariance_floor: float = 1e-6,
-    weight_floor: float = 1e-12,
+    covariance_floor: float = 1e-4,
+    weight_floor: float = 0.0,
 ) -> Dict[str, torch.Tensor]:
     """
     MIMOGS beamspace renderer.
@@ -232,20 +252,17 @@ def render(
     rx_pos = _ensure_pos_shape(rx_pos).to(pc.get_xyz.device, dtype=pc.get_xyz.dtype)
     tx_pos = _ensure_pos_shape(tx_pos).to(pc.get_xyz.device, dtype=pc.get_xyz.dtype)
 
-    means = pc.get_xyz      # (N,3)
-    covariances = pc.get_covariance(scaling_modifier) # (N,3,3)
-    complex_weight = pc.get_complex_weight         # (N,1) complex
+    # means = pc.get_xyz      # (N,3)
+    # covariances = pc.get_covariance(scaling_modifier) # (N,3,3)
+    # complex_weight = pc.get_complex_weight         # (N,1) complex
 
-    if use_geometric_phase:
-        if carrier_frequency_hz <= 0.0:
-            raise ValueError("Carrier frequency must be positive when use_geometric_phase=True")
-        complex_weight = _apply_geometric_phase(
-            complex_weight = complex_weight,
-            means = means,
-            tx_pos = tx_pos,
-            rx_pos = rx_pos,
-            carrier_frequency_hz = carrier_frequency_hz,
-        )
+    means = pc.get_xyz
+    covariances = pc.get_covariance()
+    gain_weight = pc.get_gain_weight
+    _assert_finite_local("gain_weight", gain_weight)
+
+    _assert_finite_local("means", means)
+    _assert_finite_local("covariances", covariances)
 
     # ------------------------------------------------------------------
     # Build beam centers in uv-domain
@@ -273,13 +290,21 @@ def render(
         array_pos=rx_pos,
         covariance_floor = covariance_floor,
     )
+
+    _assert_finite_local("rx_uv_mean", rx_uv_mean)
+    _assert_finite_local("rx_cov_uv", rx_cov_uv)
+
+
     rx_weights = _gaussian_beam_weights_from_uv(
-        uv_mean = rx_uv_mean,
-        cov_uv = rx_cov_uv,
-        beam_centers_uv = rx_beam_centers_uv,
-        normalize = normalize_beam_weights,
-        weight_floor = weight_floor,
+    uv_mean=rx_uv_mean,
+    cov_uv=rx_cov_uv,
+    beam_centers_uv=rx_beam_centers_uv,
+    normalize=normalize_beam_weights,
+    weight_floor=weight_floor,
+    eig_floor=max(covariance_floor, 1e-4),
     )
+
+    _assert_finite_local("rx_weights", rx_weights)
 
     # ------------------------------------------------------------------
     # Covariance-aware soft projection to Tx beam-domain
@@ -291,33 +316,42 @@ def render(
         covariance_floor = covariance_floor,
     )
 
+    _assert_finite_local("tx_uv_mean", tx_uv_mean)
+    _assert_finite_local("tx_cov_uv", tx_cov_uv)
+
     tx_weights = _gaussian_beam_weights_from_uv(
-        uv_mean = tx_uv_mean,
-        cov_uv = tx_cov_uv,
-        beam_centers_uv = tx_beam_centers_uv,
-        normalize = normalize_beam_weights,
-        weight_floor = weight_floor,
+        uv_mean=tx_uv_mean,
+        cov_uv=tx_cov_uv,
+        beam_centers_uv=tx_beam_centers_uv,
+        normalize=normalize_beam_weights,
+        weight_floor=weight_floor,
+        eig_floor=max(covariance_floor, 1e-4),
     )
+
+    _assert_finite_local("tx_weights", tx_weights)
 
     # ------------------------------------------------------------------
     # Beamspace splatting / superposition
     # H_n[p,q] = c_n * r_n[p] * t_n[q]
     # ------------------------------------------------------------------ 
     beam_contributions = (
-        complex_weight.view(-1, 1, 1)
-        * rx_weights[:, :, None].to(complex_weight.dtype)
-        * tx_weights[:, None, :].to(complex_weight.dtype)
-    ) # (N, Nr, Nt)
+        gain_weight.view(-1, 1, 1)
+        * rx_weights[:, :, None]
+        * tx_weights[:, None, :]
+    )
 
-    H = beam_contributions.sum(dim=0) # (Nr, Nt)
+    _assert_finite_local("beam_contributions", beam_contributions)
+
+    H = beam_contributions.sum(dim=0)
+    _assert_finite_local("H", H)
 
     # A simple per_Gaussian usefulness score for prune/densify
     per_gaussian_importance = beam_contributions.abs().sum(dim=(1,2))
+    _assert_finite_local("per_gaussian_importance", per_gaussian_importance)
 
     return {
-        "render": H,
-        "magnitude": torch.abs(H),
-        "phase": torch.angle(H),
+        "render": H,                     # now H itself is the predicted magnitude map
+        "magnitude": H,
         "rx_weights": rx_weights,
         "tx_weights": tx_weights,
         "per_gaussian_importance": per_gaussian_importance,

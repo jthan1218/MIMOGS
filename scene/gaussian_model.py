@@ -24,7 +24,6 @@ class GaussianModel:
     Learnable attributes per Gaussian:
     - mean                  : xyz
     - covariance            : rotation + scaling
-    - complex gain          : magnitude + phase
     - opacity-like weight   :opacity
     """
 
@@ -45,7 +44,6 @@ class GaussianModel:
         self._rotation = torch.empty(0, device = self.device)
         self._opacity = torch.empty(0, device = self.device)
         self._gain_mag = torch.empty(0, device = self.device)
-        self._gain_phase = torch.empty(0, device = self.device)
 
         self.optimizer = None
         self.xyz_scheduler_args = None
@@ -58,7 +56,7 @@ class GaussianModel:
         self.setup_functions()
 
     def setup_functions(self):
-        self.scaling_activation = torch.exp
+        self.scaling_activation = lambda x: torch.exp(torch.clamp(x, min=-10.0, max=5.0))
         self.scaling_inverse_activation = torch.log
 
         self.opacity_activation = torch.sigmoid
@@ -93,18 +91,8 @@ class GaussianModel:
         return self.gain_mag_activation(self._gain_mag)
 
     @property
-    def get_gain_phase(self):
-        return self._gain_phase
-
-    @property
-    def get_complex_gain(self):
-        mag = self.get_gain_mag.squeeze(-1)
-        phase = self.get_gain_phase.squeeze(-1)
-        return torch.polar(mag, phase).unsqueeze(-1)
-
-    @property
-    def get_complex_weight(self):
-        return self.get_opacity * self.get_complex_gain
+    def get_gain_weight(self):
+        return self.get_opacity * self.get_gain_mag
 
     def get_covariance(self, scaling_modifier: float = 1.0):
         return self.covariance_activation(
@@ -161,7 +149,7 @@ class GaussianModel:
         scene_scale = fused_point_cloud.std(dim = 0).mean().clamp(min = 1e-3)
         init_scale = torch.full(
             (n_points, 3),
-            0.05 * scene_scale.item(),
+            0.5 * scene_scale.item(),
             dtype = torch.float32,
             device = self.device,
         )
@@ -177,16 +165,12 @@ class GaussianModel:
         gain_mag_raw = self.gain_mag_inverse_activation(
             0.1 * torch.ones((n_points, 1), dtype = torch.float32, device = self.device)
         )
-        gain_phase = 2.0 * math.pi * torch.rand(
-            (n_points, 1), dtype = torch.float32, device = self.device
-        )
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._scaling = nn.Parameter(scales_raw.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities_raw.requires_grad_(True))
         self._gain_mag = nn.Parameter(gain_mag_raw.requires_grad_(True))
-        self._gain_phase = nn.Parameter(gain_phase.requires_grad_(True))
 
         self._reset_statistics()
         print(f"[GaussianModel] Number of points at initialization: {n_points}")
@@ -201,7 +185,6 @@ class GaussianModel:
             self._rotation.detach(),
             self._opacity.detach(),
             self._gain_mag.detach(),
-            self._gain_phase.detach(),
             self.xyz_gradient_accum.detach(),
             self.grad_denom.detach(),
             self.importance_accum.detach(),
@@ -219,7 +202,6 @@ class GaussianModel:
             rotation,
             opacity,
             gain_mag,
-            gain_phase,
             xyz_gradient_accum,
             grad_denom,
             importance_accum,
@@ -232,7 +214,6 @@ class GaussianModel:
         self._rotation = nn.Parameter(rotation.to(self.device).requires_grad_(True))
         self._opacity = nn.Parameter(opacity.to(self.device).requires_grad_(True))
         self._gain_mag = nn.Parameter(gain_mag.to(self.device).requires_grad_(True))
-        self._gain_phase = nn.Parameter(gain_phase.to(self.device).requires_grad_(True))
 
         self.training_setup(training_args)
 
@@ -263,13 +244,12 @@ class GaussianModel:
             {"params": [self._scaling], "lr": training_args.scaling_lr, "name": "scaling"},
             {"params": [self._rotation], "lr": training_args.rotation_lr, "name": "rotation"},
             {"params": [self._gain_mag], "lr": training_args.gain_lr, "name": "gain_mag"},
-            {"params": [self._gain_phase], "lr": training_args.phase_lr, "name": "gain_phase"},
         ]
 
         if getattr(training_args, "optimizer_type", self.optimizer_type) == "adamw":
-            self.optimizer = torch.optim.AdamW(param_groups, lr = 0.0, eps = 1e-15)
+            self.optimizer = torch.optim.AdamW(param_groups, lr = 0.0, eps = 1e-8)
         else:
-            self.optimizer = torch.optim.Adam(param_groups, lr = 0.0, eps = 1e-15)
+            self.optimizer = torch.optim.Adam(param_groups, lr = 0.0, eps = 1e-8)
 
         self.xyz_scheduler_args = get_expon_lr_func(
             lr_init = training_args.position_lr_init,
@@ -322,7 +302,7 @@ class GaussianModel:
         attrs = ["x", "y", "z", "nx", "ny", "nz", "opacity"]
         attrs += [f"scale_{i}" for i in range(3)]
         attrs += [f"rot_{i}" for i in range(4)]
-        attrs += ["gain_mag", "gain_phase"]
+        attrs += ["gain_mag"]
         return attrs
 
     def save_ply(self, path: str):
@@ -334,13 +314,12 @@ class GaussianModel:
         scales = self.get_scaling.detach().cpu().numpy()
         rotations = self.get_rotation.detach().cpu().numpy()
         gain_mag = self.get_gain_mag.detach().cpu().numpy()
-        gain_phase = self.get_gain_phase.detach().cpu().numpy()
 
         dtype_full = [(attribute, "f4") for attribute in self.construct_list_of_attributes()]
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
         attributes = np.concatenate(
-            [xyz, normals, opacities, scales, rotations, gain_mag, gain_phase], axis = 1
+            [xyz, normals, opacities, scales, rotations, gain_mag], axis = 1
         )
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, "vertex")
@@ -373,14 +352,12 @@ class GaussianModel:
             rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
 
         gain_mag = np.asarray(plydata.elements[0]["gain_mag"])[..., np.newaxis]
-        gain_phase = np.asarray(plydata.elements[0]["gain_phase"])[..., np.newaxis]
 
         xyz_t = torch.tensor(xyz, dtype=torch.float32, device=self.device)
         opacity_t = torch.tensor(opacities, dtype=torch.float32, device=self.device)
         scale_t = torch.tensor(scales, dtype=torch.float32, device=self.device)
         rot_t = torch.tensor(rots, dtype=torch.float32, device=self.device)
         gain_mag_t = torch.tensor(gain_mag, dtype=torch.float32, device=self.device)
-        gain_phase_t = torch.tensor(gain_phase, dtype=torch.float32, device=self.device)
 
         self._xyz = nn.Parameter(xyz_t.requires_grad_(True))
         self._opacity = nn.Parameter(
@@ -393,8 +370,6 @@ class GaussianModel:
         self._gain_mag = nn.Parameter(
             self.gain_mag_inverse_activation(torch.clamp(gain_mag_t, min=1e-8)).requires_grad_(True)
         )
-
-        self._gain_phase = nn.Parameter(gain_phase_t.requires_grad_(True))
 
         self._reset_statistics()
 
@@ -486,7 +461,6 @@ class GaussianModel:
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
         self._gain_mag = optimizable_tensors["gain_mag"]
-        self._gain_phase = optimizable_tensors["gain_phase"]
 
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
         self.grad_denom = self.grad_denom[valid_points_mask]
@@ -500,7 +474,6 @@ class GaussianModel:
         new_scaling: torch.Tensor,
         new_rotation: torch.Tensor,
         new_gain_mag: torch.Tensor,
-        new_gain_phase: torch.Tensor,
     ):
         tensors_dict = {
             "xyz": new_xyz,
@@ -508,7 +481,6 @@ class GaussianModel:
             "scaling": new_scaling,
             "rotation": new_rotation,
             "gain_mag": new_gain_mag,
-            "gain_phase": new_gain_phase,
         }
 
         optimizable_tensors = self.cat_tensors_to_optimizer(tensors_dict)
@@ -518,7 +490,6 @@ class GaussianModel:
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
         self._gain_mag = optimizable_tensors["gain_mag"]
-        self._gain_phase = optimizable_tensors["gain_phase"]
 
         self._reset_statistics()
 
@@ -549,10 +520,10 @@ class GaussianModel:
         new_scaling = self._scaling[selected_pts_mask].clone()
         new_rotation = self._rotation[selected_pts_mask].clone()
         new_gain_mag = self._gain_mag[selected_pts_mask].clone()
-        new_gain_phase = self._gain_phase[selected_pts_mask].clone()
+
 
         self.densification_postfix(
-            new_xyz, new_opacity, new_scaling, new_rotation, new_gain_mag, new_gain_phase
+            new_xyz, new_opacity, new_scaling, new_rotation, new_gain_mag
         )
 
     def densify_and_split(
@@ -598,10 +569,9 @@ class GaussianModel:
         new_rotation = self.get_rotation[selected_pts_mask].repeat(n_splits, 1)
         new_opacity = self._opacity[selected_pts_mask].repeat(n_splits, 1)
         new_gain_mag = self._gain_mag[selected_pts_mask].repeat(n_splits, 1)
-        new_gain_phase = self._gain_phase[selected_pts_mask].repeat(n_splits, 1)
 
         self.densification_postfix(
-            new_xyz, new_opacity, new_scaling, new_rotation, new_gain_mag, new_gain_phase
+            new_xyz, new_opacity, new_scaling, new_rotation, new_gain_mag
         )
 
         prune_filter = torch.cat(

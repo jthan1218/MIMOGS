@@ -59,12 +59,9 @@ class DeepMIMODataset(Dataset):
 
         self.positions = torch.tensor(mat_data["positions"], dtype=torch.float32)
         self.magnitude = torch.tensor(mat_data["magnitude"], dtype=torch.float32)
-        self.phases = torch.tensor(mat_data["phases"], dtype=torch.float32)
 
-        if not (
-            self.positions.shape[0] == self.magnitude.shape[0] == self.phases.shape[0]
-        ):
-            raise ValueError("Positions, magnitude, and phases must have the same number of samples")
+        if self.positions.shape[0] != self.magnitude.shape[0]:
+            raise ValueError("Positions and magnitude must have the same number of samples")
 
         self.n_samples = self.positions.shape[0]
         self.normalize = normalize
@@ -83,7 +80,7 @@ class DeepMIMODataset(Dataset):
     def __len__(self):
         return self.n_samples
 
-    def __getitem__(self, index):       
-        return self.magnitude[index], self.phases[index], self.positions[index]
+    def __getitem__(self, index):
+        return self.magnitude[index], self.positions[index]
 
 dataset_dict = {"rfid": Spectrum_dataset, "mimo": DeepMIMODataset}

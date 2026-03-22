@@ -1,12 +1,40 @@
 import os
 import yaml
 
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from utils.system_utils import searchForMaxIteration
 from scene.gaussian_model import GaussianModel
 from arguments import ModelParams
 from scene.dataloader import *
+import numpy as np
+import torch
+
+def build_power_balanced_weights(dataset, num_bins: int = 12):
+    powers = (
+        dataset.magnitude.float()
+        .reshape(len(dataset), -1)
+        .pow(2)
+        .mean(dim=1)
+        .cpu()
+        .numpy()
+    )
+
+    logp = np.log10(np.maximum(powers, 1e-12))
+    lo = float(logp.min())
+    hi = float(logp.max())
+
+    if hi - lo < 1e-12:
+        return torch.ones(len(dataset), dtype=torch.double)
+
+    edges = np.linspace(lo, hi, num_bins + 1)
+    bin_ids = np.digitize(logp, edges[1:-1], right=False).astype(np.int64)
+    counts = np.bincount(bin_ids, minlength=num_bins)
+
+    weights = 1.0 / np.maximum(counts[bin_ids], 1)
+    weights = weights / weights.mean()
+
+    return torch.tensor(weights, dtype=torch.double)
 
 class Scene:
 
@@ -36,7 +64,7 @@ class Scene:
         self.gaussians = gaussians
 
         self.batch_size = 1
-        self.num_epochs = 30
+        self.num_epochs = 50
 
         self.datadir = os.path.abspath(args.source_path)
 
@@ -69,12 +97,19 @@ class Scene:
         self.train_set = DeepMIMODataset(train_mat_path)
         self.test_set = DeepMIMODataset(test_mat_path)
 
+        train_weights = build_power_balanced_weights(self.train_set, num_bins=12)
+        train_sampler = WeightedRandomSampler(
+            weights=train_weights,
+            num_samples=len(train_weights),
+            replacement=True,
+        )
+
         self.train_iter = DataLoader(
             self.train_set,
             batch_size=self.batch_size,
             shuffle=shuffle,
             num_workers=0,
-            )
+        )
 
         self.test_iter = DataLoader(
             self.test_set,

@@ -80,7 +80,7 @@ def build_rotation(r):
 def build_scaling_rotation(s, r):
 
     device = s.device
-    L = torch.zeros((s.shape[0], 3, 3), dtype=s.type, device=device)
+    L = torch.zeros((s.shape[0], 3, 3), dtype=s.dtype, device=device)
     R = build_rotation(r)
 
     L[:,0,0] = s[:,0]
