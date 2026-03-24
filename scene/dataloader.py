@@ -83,4 +83,37 @@ class DeepMIMODataset(Dataset):
     def __getitem__(self, index):
         return self.magnitude[index], self.positions[index]
 
-dataset_dict = {"rfid": Spectrum_dataset, "mimo": DeepMIMODataset}
+class UmiDataset(Dataset):
+    """UMi dataset from mat files with auto-normalized positions."""
+
+    def __init__(self, mat_path: str, normalize: bool = True) -> None:
+        super().__init__()
+        mat_data = sio.loadmat(mat_path)
+
+        self.positions = torch.tensor(mat_data["positions"], dtype=torch.float32)
+        self.magnitude = torch.tensor(mat_data["magnitude"], dtype=torch.float32)
+
+        if self.positions.shape[0] != self.magnitude.shape[0]:
+            raise ValueError("Positions and magnitude must have the same number of samples")
+
+        self.n_samples = self.positions.shape[0]
+        self.normalize = normalize
+        self.scale_factor = 1.0
+
+        if self.normalize:
+            max_val = self.positions.abs().max()
+            self.scale_factor = float(max_val) + 1e-6
+
+            print(f"[Dataset] Auto-normalizing positions...")
+            print(f"   - Max coordinate found: {max_val:.4f}")
+            print(f"   - Scale factor applied: {self.scale_factor:.4f}")
+
+            self.positions = self.positions / self.scale_factor
+
+    def __len__(self):
+        return self.n_samples
+
+    def __getitem__(self, index):
+        return self.magnitude[index], self.positions[index]
+
+dataset_dict = {"rfid": Spectrum_dataset, "mimo": DeepMIMODataset, "mimo2": UmiDataset}

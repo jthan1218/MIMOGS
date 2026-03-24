@@ -93,6 +93,9 @@ class OptimizationParams(ParamGroup):
         self.optimizer_type = "default"
 
         self.gain_lr = 0.0025
+
+        self.opacity_lr_final = 0.003
+        self.gain_lr_final = 0.0003
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser: ArgumentParser):

@@ -39,38 +39,190 @@ def log_magnitude_loss(
     return torch.mean((pred_log - target_log) ** 2)
 
 
+# def hybrid_magnitude_loss(
+#     pred: torch.Tensor,
+#     target: torch.Tensor,
+#     alpha: float = 0.2,
+#     beta: float = 0.3,
+#     gamma: float = 0.5,
+#     eps: float = 1e-4,
+#     mag_scale: float = 1e-3,
+#     return_terms: bool = False,
+# ):
+#     abs_loss = magnitude_mse_loss(pred, target)
+#     rel_loss = normalized_magnitude_mse_loss(pred, target, eps=eps)
+#     log_loss = log_magnitude_loss(pred, target, mag_scale=mag_scale)
+
+#     total_loss = alpha * abs_loss + beta * rel_loss + gamma * log_loss
+
+#     if return_terms:
+#         target_power = torch.mean(target ** 2)
+#         return total_loss, abs_loss.detach(), rel_loss.detach(), log_loss.detach(), target_power.detach()
+
+#     return total_loss
+
+# def hybrid_magnitude_loss(
+#     pred: torch.Tensor,
+#     target: torch.Tensor,
+#     alpha: float = 0.3,
+#     beta: float = 0.2,
+#     gamma: float = 0.5,
+#     eps: float = 1e-8,
+#     mag_scale: float = 0.05,
+#     return_terms: bool = False,
+# ):
+#     """
+#     Version 0: sample-wise max-normalized magnitude shape loss.
+#     Both pred and target are normalized by their own sample max.
+#     """
+#     pred_n = normalize_mag_map(pred, eps=eps)
+#     target_n = normalize_mag_map(target, eps=eps)
+
+#     abs_loss = magnitude_mse_loss(pred_n, target_n)
+#     rel_loss = normalized_magnitude_mse_loss(pred_n, target_n, eps=eps)
+#     log_loss = log_magnitude_loss(pred_n, target_n, mag_scale=mag_scale)
+
+#     total_loss = alpha * abs_loss + beta * rel_loss + gamma * log_loss
+
+#     if return_terms:
+#         target_power = torch.mean(target_n ** 2)
+#         return total_loss, abs_loss.detach(), rel_loss.detach(), log_loss.detach(), target_power.detach()
+
+#     return total_loss
+
 def hybrid_magnitude_loss(
     pred: torch.Tensor,
     target: torch.Tensor,
-    alpha: float = 0.2,
-    beta: float = 0.3,
+    alpha: float = 0.3,
+    beta: float = 0.2,
     gamma: float = 0.5,
-    eps: float = 1e-4,
-    mag_scale: float = 1e-3,
+    lambda_topk: float = 0.15,
+    lambda_bg: float = 0.05,
+    lambda_rank: float = 0.05,
+    topk_ratio: float = 0.125,
+    bg_threshold: float = 0.05,
+    rank_margin: float = 0.05,
+    num_neg: int = 16,
+    eps: float = 1e-8,
+    mag_scale: float = 0.05,
     return_terms: bool = False,
 ):
-    abs_loss = magnitude_mse_loss(pred, target)
-    rel_loss = normalized_magnitude_mse_loss(pred, target, eps=eps)
-    log_loss = log_magnitude_loss(pred, target, mag_scale=mag_scale)
+    """
+    Shape-normalized magnitude loss + beam structure regularizers.
+    """
 
-    total_loss = alpha * abs_loss + beta * rel_loss + gamma * log_loss
+    pred_n = normalize_mag_map(pred, eps=eps)
+    target_n = normalize_mag_map(target, eps=eps)
+
+    abs_loss = magnitude_mse_loss(pred_n, target_n)
+    rel_loss = normalized_magnitude_mse_loss(pred_n, target_n, eps=eps)
+    log_loss = log_magnitude_loss(pred_n, target_n, mag_scale=mag_scale)
+    topk_loss = topk_shape_loss(pred_n, target_n, topk_ratio=topk_ratio)
+    bg_loss = background_suppression_loss(
+        pred_n, target_n, bg_threshold=bg_threshold
+    )
+    rank_loss = ranking_separation_loss(
+        pred_n,
+        target_n,
+        topk_ratio=topk_ratio,
+        num_neg=num_neg,
+        margin=rank_margin,
+    )
+
+    total_loss = (
+        alpha * abs_loss
+        + beta * rel_loss
+        + gamma * log_loss
+        + lambda_topk * topk_loss
+        + lambda_bg * bg_loss
+        + lambda_rank * rank_loss
+    )
 
     if return_terms:
-        target_power = torch.mean(target ** 2)
-        return total_loss, abs_loss.detach(), rel_loss.detach(), log_loss.detach(), target_power.detach()
+        target_power = torch.mean(target_n ** 2)
+        return (
+            total_loss,
+            abs_loss.detach(),
+            rel_loss.detach(),
+            log_loss.detach(),
+            topk_loss.detach(),
+            bg_loss.detach(),
+            rank_loss.detach(),
+            target_power.detach(),
+        )
 
     return total_loss
 
-def tail_sample_weight(
-    target_mag: torch.Tensor,
-    power_ref: float = 1e-4,
-    max_weight: float = 3.0,
-    eps: float = 1e-12,
-):
-    sample_power = torch.mean(target_mag ** 2).detach()
-    w = torch.sqrt(torch.tensor(power_ref, device=target_mag.device) / (sample_power + eps))
-    w = torch.clamp(w, min=1.0, max=max_weight)
-    return w
+def normalize_mag_map(x: torch.Tensor, eps:float = 1e-8) -> torch.Tensor:
+    return x / (torch.amax(x) + eps)
+
+def topk_shape_loss(
+    pred_n: torch.Tensor,
+    target_n: torch.Tensor,
+    topk_ratio: float = 0.125,
+) -> torch.Tensor:
+    pred_flat = pred_n.reshape(-1)
+    target_flat = target_n.reshape(-1)
+
+    k = max(1, int(round(topk_ratio * target_flat.numel())))
+    topk_idx = torch.topk(target_flat, k=k, largest=True).indices
+
+    return torch.mean((pred_flat[topk_idx] - target_flat[topk_idx]) ** 2)
+
+def background_suppression_loss(
+    pred_n: torch.Tensor,
+    target_n: torch.Tensor,
+    bg_threshold: float = 0.05,
+) -> torch.Tensor:
+    """
+    Penalize prediction leakage on weak/background beams.
+    target_n is already sample-wise normalized to [0,1].
+    """
+    bg_mask = (target_n <= bg_threshold).float()
+    denom = bg_mask.sum().clamp_min(1.0)
+    return ((pred_n ** 2) * bg_mask).sum() / denom
+
+
+def ranking_separation_loss(
+    pred_n: torch.Tensor,
+    target_n: torch.Tensor,
+    topk_ratio: float = 0.125,
+    num_neg: int = 16,
+    margin: float = 0.05,
+) -> torch.Tensor:
+    """
+    Hard-negative ranking loss.
+    Positive  : GT top-k beams
+    Negative  : non-topk beams with the largest predicted values
+    """
+    pred_flat = pred_n.reshape(-1)
+    target_flat = target_n.reshape(-1)
+
+    total_num = target_flat.numel()
+    k = max(1, int(round(topk_ratio * total_num)))
+
+    # 1) Positive set = GT top-k
+    pos_idx = torch.topk(target_flat, k=k, largest=True).indices
+
+    # 2) Negative candidate pool = everything except GT top-k
+    neg_mask = torch.ones(total_num, dtype=torch.bool, device=target_flat.device)
+    neg_mask[pos_idx] = False
+    neg_pool_idx = torch.nonzero(neg_mask, as_tuple=False).squeeze(1)
+
+    if neg_pool_idx.numel() == 0:
+        return pred_flat.new_zeros(())
+
+    # 3) Hard negatives = among non-topk beams, choose the ones
+    #    that the model predicted too strongly
+    num_neg = min(num_neg, neg_pool_idx.numel())
+    hard_order = torch.topk(pred_flat[neg_pool_idx], k=num_neg, largest=True).indices
+    neg_idx = neg_pool_idx[hard_order]
+
+    # 4) Margin ranking
+    pos = pred_flat[pos_idx].unsqueeze(1)   # (k, 1)
+    neg = pred_flat[neg_idx].unsqueeze(0)   # (1, num_neg)
+
+    return torch.relu(margin - (pos - neg)).mean()
 
 # def collect_hard_example_indices(
 #     scene,
@@ -283,17 +435,20 @@ def evaluate_and_save_random_test_samples(
 
             pred_mag = out["render"]
 
-            gt_mag_np = magnitude.detach().cpu().numpy()
-            pred_mag_np = pred_mag.detach().cpu().numpy()
+            # gt_mag_np = magnitude.detach().cpu().numpy()
+            # pred_mag_np = pred_mag.detach().cpu().numpy()
+
+            gt_mag_np = normalize_mag_map(magnitude).detach().cpu().numpy()
+            pred_mag_np = normalize_mag_map(pred_mag).detach().cpu().numpy()
 
             fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
             im0 = axes[0].imshow(gt_mag_np, aspect="equal", interpolation="nearest")
-            axes[0].set_title("Ground Truth Magnitude")
+            axes[0].set_title("Ground Truth Shape (Magnitude X)")
             plt.colorbar(im0, ax=axes[0], fraction=0.03, pad=0.04)
 
             im1 = axes[1].imshow(pred_mag_np, aspect="equal", interpolation="nearest")
-            axes[1].set_title("Predicted Magnitude")
+            axes[1].set_title("Predicted Shape (Magnitude X)")
             plt.colorbar(im1, ax=axes[1], fraction=0.03, pad=0.04)
 
             for ax in axes.ravel():
@@ -357,7 +512,7 @@ def training(model_params, opt_params, raw_args):
     save_run_args_txt(model_params.model_path, model_params, opt_params, raw_args)
 
     gaussians = GaussianModel(
-        target_gaussians = 15_000,
+        target_gaussians = 10_000,
         optimizer_type = opt_params.optimizer_type,
         device = str(device),
         init_range = 1,
@@ -424,8 +579,11 @@ def training(model_params, opt_params, raw_args):
                 )
                 dbg_pred_mag = dbg_out["render"]
 
-                loss_val = magnitude_mse_loss(dbg_pred_mag, dbg_gt_mag).item()
-                zero_val = torch.mean(dbg_gt_mag ** 2).item()
+                dbg_gt_shape = normalize_mag_map(dbg_gt_mag)
+                dbg_pred_shape = normalize_mag_map(dbg_pred_mag)
+
+                loss_val = magnitude_mse_loss(dbg_pred_shape, dbg_gt_shape).item()
+                zero_val = torch.mean(dbg_gt_shape ** 2).item()
                 ratio_val = loss_val / max(zero_val, 1e-12)
 
                 rows.append({
@@ -492,24 +650,24 @@ def training(model_params, opt_params, raw_args):
 
             assert_finite("importance", importance, iteration)
 
-            loss, abs_loss_dbg, rel_loss_dbg, log_loss_dbg, gt_power_dbg = hybrid_magnitude_loss(
+            loss, abs_loss_dbg, rel_loss_dbg, log_loss_dbg, topk_loss_dbg, bg_loss_dbg, rank_loss_dbg, gt_power_dbg = hybrid_magnitude_loss(
                 pred_mag,
                 gt_mag,
-                alpha=0.2,
-                beta=0.3,
+                alpha=0.3,
+                beta=0.2,
                 gamma=0.5,
-                eps=1e-4,
-                mag_scale=1e-3,
+                lambda_topk=0.15,
+                lambda_bg=0.05,
+                lambda_rank=0.10,
+                topk_ratio=0.125,
+                bg_threshold=0.05,
+                rank_margin=0.05,
+                num_neg=32,
+                eps=1e-8,
+                mag_scale=0.05,
                 return_terms=True,
             )
             assert_finite("loss", loss, iteration)
-
-            # tail_w = tail_sample_weight(
-            #     gt_mag,
-            #     power_ref=1e-4,
-            #     max_weight=3.0,
-            # )
-            # loss = loss * tail_w
 
             gaussians.optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -549,6 +707,9 @@ def training(model_params, opt_params, raw_args):
                     f"abs_loss: {float(abs_loss_dbg):.8f}, "
                     f"rel_loss: {float(rel_loss_dbg):.8f}, "
                     f"log_loss: {float(log_loss_dbg):.8f}, "
+                    f"topk_loss: {float(topk_loss_dbg):.8f}, "
+                    f"bg_loss: {float(bg_loss_dbg):.8f}, "
+                    f"rank_loss: {float(rank_loss_dbg):.8f}, "
                     f"gt_power: {float(gt_power_dbg):.8f}"
                 )
 

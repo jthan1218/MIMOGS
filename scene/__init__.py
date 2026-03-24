@@ -1,7 +1,7 @@
 import os
 import yaml
 
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader
 
 from utils.system_utils import searchForMaxIteration
 from scene.gaussian_model import GaussianModel
@@ -64,7 +64,7 @@ class Scene:
         self.gaussians = gaussians
 
         self.batch_size = 1
-        self.num_epochs = 50
+        self.num_epochs = 20
 
         self.datadir = os.path.abspath(args.source_path)
 
@@ -82,6 +82,13 @@ class Scene:
         self.r_o = self.bs_position
         self.gateway_orientation = self.bs_orientation
 
+        dataset_name = data.get("dataset_name", "mimo")
+        if dataset_name == "umi":
+            dataset_key = "mimo2"
+        else:
+            dataset_key = "mimo"
+
+
         # Optional checkpoint loading
         if load_iteration:
             if load_iteration == -1:
@@ -94,15 +101,10 @@ class Scene:
         train_mat_path = os.path.join(self.datadir, "train.mat")
         test_mat_path = os.path.join(self.datadir, "test.mat")
 
-        self.train_set = DeepMIMODataset(train_mat_path)
-        self.test_set = DeepMIMODataset(test_mat_path)
+        dataset_cls = dataset_dict[dataset_key]
 
-        train_weights = build_power_balanced_weights(self.train_set, num_bins=12)
-        train_sampler = WeightedRandomSampler(
-            weights=train_weights,
-            num_samples=len(train_weights),
-            replacement=True,
-        )
+        self.train_set = dataset_cls(train_mat_path)
+        self.test_set = dataset_cls(test_mat_path)
 
         self.train_iter = DataLoader(
             self.train_set,

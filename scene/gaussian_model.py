@@ -258,16 +258,31 @@ class GaussianModel:
             max_steps = training_args.position_lr_max_steps,
         )
 
-    def update_learning_rate(self, iteration: int):
-        if self.optimizer is None:
-            return None
+        self.opacity_scheduler_args = get_expon_lr_func(
+            lr_init=training_args.opacity_lr,
+            lr_final=training_args.opacity_lr_final,
+            lr_delay_mult=1.0,
+            max_steps=training_args.iterations,
+        )
 
-        current_xyz_lr = None
-        for group in self.optimizer.param_groups:
-            if group["name"] == "xyz":
-                current_xyz_lr = self.xyz_scheduler_args(iteration)
-                group["lr"] = current_xyz_lr
-        return current_xyz_lr
+        self.gain_scheduler_args = get_expon_lr_func(
+            lr_init=training_args.gain_lr,
+            lr_final=training_args.gain_lr_final,
+            lr_delay_mult=1.0,
+            max_steps=training_args.iterations,
+        )
+
+    def update_learning_rate(self, iteration):
+        for param_group in self.optimizer.param_groups:
+            if param_group["name"] == "xyz":
+                lr = self.xyz_scheduler_args(iteration)
+                param_group["lr"] = lr
+            elif param_group["name"] == "opacity":
+                lr = self.opacity_scheduler_args(iteration)
+                param_group["lr"] = lr
+            elif param_group["name"] == "gain_mag":
+                lr = self.gain_scheduler_args(iteration)
+                param_group["lr"] = lr
 
     # ------------------------------------------------------------------
     # Statistics for pruning / densification
