@@ -93,12 +93,12 @@ def log_magnitude_loss(
 def hybrid_magnitude_loss(
     pred: torch.Tensor,
     target: torch.Tensor,
-    alpha: float = 0.3,
-    beta: float = 0.2,
-    gamma: float = 0.5,
-    lambda_topk: float = 0.15,
-    lambda_bg: float = 0.05,
-    lambda_rank: float = 0.05,
+    alpha: float = 0.4,
+    beta: float = 0.05,
+    gamma: float = 0.2,
+    lambda_topk: float = 0.10,
+    lambda_bg: float = 0.01,
+    lambda_rank: float = 0.02,
     topk_ratio: float = 0.125,
     bg_threshold: float = 0.05,
     rank_margin: float = 0.05,
@@ -107,35 +107,41 @@ def hybrid_magnitude_loss(
     mag_scale: float = 0.05,
     return_terms: bool = False,
 ):
-    """
-    Shape-normalized magnitude loss + beam structure regularizers.
-    """
+    # pred는 raw scale 유지
+    pred_n = pred
 
-    pred_n = normalize_mag_map(pred, eps=eps)
+    # target만 sample-wise normalization
     target_n = normalize_mag_map(target, eps=eps)
 
     abs_loss = magnitude_mse_loss(pred_n, target_n)
     rel_loss = normalized_magnitude_mse_loss(pred_n, target_n, eps=eps)
     log_loss = log_magnitude_loss(pred_n, target_n, mag_scale=mag_scale)
+
     topk_loss = topk_shape_loss(pred_n, target_n, topk_ratio=topk_ratio)
-    bg_loss = background_suppression_loss(
-        pred_n, target_n, bg_threshold=bg_threshold
-    )
+    bg_loss = background_suppression_loss(pred_n, target_n, bg_threshold=bg_threshold)
     rank_loss = ranking_separation_loss(
-        pred_n,
-        target_n,
-        topk_ratio=topk_ratio,
-        num_neg=num_neg,
-        margin=rank_margin,
+        pred_n, target_n, topk_ratio=topk_ratio, num_neg=num_neg, margin=rank_margin
     )
 
+    # total_loss = (
+    # 0.7 * abs_loss
+    # + 0.3 * topk_loss
+    # )   
+
+    # total_loss = (
+    #     alpha * abs_loss
+    #     + beta * rel_loss
+    #     + gamma * log_loss
+    #     + lambda_topk * topk_loss
+    #     + lambda_bg * bg_loss
+    #     + lambda_rank * rank_loss
+    # )
+
     total_loss = (
-        alpha * abs_loss
-        + beta * rel_loss
-        + gamma * log_loss
-        + lambda_topk * topk_loss
-        + lambda_bg * bg_loss
-        + lambda_rank * rank_loss
+    0.45 * abs_loss
+    + 0.20 * topk_loss
+    + 0.20 * bg_loss
+    + 0.15 * log_loss
     )
 
     if return_terms:
@@ -439,16 +445,16 @@ def evaluate_and_save_random_test_samples(
             # pred_mag_np = pred_mag.detach().cpu().numpy()
 
             gt_mag_np = normalize_mag_map(magnitude).detach().cpu().numpy()
-            pred_mag_np = normalize_mag_map(pred_mag).detach().cpu().numpy()
+            pred_mag_np = pred_mag.detach().cpu().numpy()
 
             fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
             im0 = axes[0].imshow(gt_mag_np, aspect="equal", interpolation="nearest")
-            axes[0].set_title("Ground Truth Shape (Magnitude X)")
+            axes[0].set_title("Ground Truth Shape (sample-wise normalized)")
             plt.colorbar(im0, ax=axes[0], fraction=0.03, pad=0.04)
 
             im1 = axes[1].imshow(pred_mag_np, aspect="equal", interpolation="nearest")
-            axes[1].set_title("Predicted Shape (Magnitude X)")
+            axes[1].set_title("Predicted Shape (raw scale)")
             plt.colorbar(im1, ax=axes[1], fraction=0.03, pad=0.04)
 
             for ax in axes.ravel():
@@ -512,7 +518,7 @@ def training(model_params, opt_params, raw_args):
     save_run_args_txt(model_params.model_path, model_params, opt_params, raw_args)
 
     gaussians = GaussianModel(
-        target_gaussians = 10_000,
+        target_gaussians = 5_000,
         optimizer_type = opt_params.optimizer_type,
         device = str(device),
         init_range = 1,
