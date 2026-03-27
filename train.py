@@ -161,7 +161,7 @@ def training(model_params, opt_params, raw_args):
     save_run_args_txt(model_params.model_path, model_params, opt_params, raw_args)
 
     gaussians = GaussianModel(
-        target_gaussians = 5_000,
+        target_gaussians = 10_000,
         optimizer_type = opt_params.optimizer_type,
         device = str(device),
         init_range = 1,
@@ -319,9 +319,11 @@ def training(model_params, opt_params, raw_args):
             assert_finite("loss", loss, iteration)
 
             gaussians.optimizer.zero_grad(set_to_none=True)
+            gaussians.dynamic_gain_optimizer.zero_grad(set_to_none=True)
             loss.backward()
             gaussians.accumulate_training_stats(importance=importance)
             gaussians.optimizer.step()
+            gaussians.dynamic_gain_optimizer.step()
 
 
             # Densify and prune OFF FOR DEBUGGING
@@ -337,6 +339,11 @@ def training(model_params, opt_params, raw_args):
             #             max_scale = None,
             #             n_splits = 2,
             #         )
+
+            dyn_grad_norm = 0.0
+            for p in gaussians.dynamic_gain_net.parameters():
+                if p.grad is not None:
+                    dyn_grad_norm += p.grad.norm().item()
             
             if iteration > 1000 and iteration % 1000 == 0:
                 with torch.no_grad():
@@ -345,7 +352,8 @@ def training(model_params, opt_params, raw_args):
                         f"opacity={gaussians._opacity.grad.norm().item():.3e}, "
                         f"scaling={gaussians._scaling.grad.norm().item():.3e}, "
                         f"rotation={gaussians._rotation.grad.norm().item():.3e}, "
-                        f"gain_mag={gaussians._gain_mag.grad.norm().item():.3e}, "
+                        # f"gain_mag={gaussians._gain_mag.grad.norm().item():.3e}, "
+                        f"dyn_gain={dyn_grad_norm:.3e}"
                     )
 
             if iteration > 0 and iteration % 1000 == 0:

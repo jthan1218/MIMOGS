@@ -76,14 +76,10 @@ class ModelParams(ParamGroup):
         return g
 
 class OptimizationParams(ParamGroup):
-    """
-    Optimization parameters
-    """
-
     def __init__(self, parser: ArgumentParser):
         self.iterations = 200_000
-        self.position_lr_init = 0.0016 # originally 0.00016
-        self.position_lr_final = 0.000016 # originally 0.0000016
+        self.position_lr_init = 0.0016
+        self.position_lr_final = 0.000016
         self.position_lr_delay_mult = 0.01
         self.position_lr_max_steps = 30_000
 
@@ -93,9 +89,13 @@ class OptimizationParams(ParamGroup):
         self.optimizer_type = "default"
 
         self.gain_lr = 0.0025
-
         self.opacity_lr_final = 0.003
         self.gain_lr_final = 0.0003
+
+        # 추가
+        self.dynamic_gain_lr = 0.001
+        self.dynamic_gain_lr_final = 0.0001
+
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser: ArgumentParser):

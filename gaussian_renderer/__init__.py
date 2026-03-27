@@ -258,8 +258,9 @@ def render(
 
     means = pc.get_xyz
     covariances = pc.get_covariance()
-    gain_weight = pc.get_gain_weight
-    _assert_finite_local("gain_weight", gain_weight)
+    gain_weight = pc.get_dynamic_gain_weight(rx_pos)
+    # gain_weight = pc.get_opacity * dynamic_gain_mag
+    # _assert_finite_local("gain_weight", gain_weight)
 
     _assert_finite_local("means", means)
     _assert_finite_local("covariances", covariances)
@@ -356,4 +357,5 @@ def render(
         "tx_weights": tx_weights,
         "per_gaussian_importance": per_gaussian_importance,
         "beam_contributions": beam_contributions,
+        "gain_weight": gain_weight,
     }

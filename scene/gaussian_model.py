@@ -18,6 +18,32 @@ from utils.general_utils import (
 
 from typing import Optional, Dict, Any
 
+class DynamicGainNet(nn.Module):
+    """
+    Per-Gaussian dynamic gain generator.
+    Input:
+        [xyz(3), rx(3), rel=xyz-rx(3), log1p(dist)(1)] -> 10 dims
+    Output:
+        scalar gain s_n(r) >= 0
+    """
+    def __init__(self, in_dim: int = 10, hidden_dim: int = 64, init_gain: float = 0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+        # 처음엔 old base gain ~ 0.1 수준으로 시작
+        nn.init.zeros_(self.net[-1].weight)
+        init_bias = float(inverse_softplus(torch.tensor(init_gain)))
+        nn.init.constant_(self.net[-1].bias, init_bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
 class GaussianModel:
     """MIMOGS Gaussian scene model
 
@@ -52,7 +78,11 @@ class GaussianModel:
         self.grad_denom = torch.empty(0,device = self.device)
         self.importance_accum = torch.empty(0,device = self.device)
         self.importance_denom = torch.empty(0,device = self.device)
-
+        
+        self.dynamic_gain_net = DynamicGainNet().to(self.device)
+        self.dynamic_gain_optimizer = None
+        self.dynamic_gain_scheduler_args = None
+        
         self.setup_functions()
 
     def setup_functions(self):
@@ -190,6 +220,9 @@ class GaussianModel:
             self.importance_accum.detach(),
             self.importance_denom.detach(),
             None if self.optimizer is None else self.optimizer.state_dict(),
+
+            self.dynamic_gain_net.state_dict(),
+            None if self.dynamic_gain_optimizer is None else self.dynamic_gain_optimizer.state_dict(),
         )
 
     def restore(self, model_args, training_args):
@@ -207,6 +240,9 @@ class GaussianModel:
             importance_accum,
             importance_denom,
             opt_dict,
+
+            dynamic_gain_net_dict,
+            dynamic_gain_opt_dict,
         ) = model_args
 
         self._xyz = nn.Parameter(xyz.to(self.device).requires_grad_(True))
@@ -224,6 +260,12 @@ class GaussianModel:
         
         if opt_dict is not None:
             self.optimizer.load_state_dict(opt_dict)
+
+        if dynamic_gain_net_dict is not None:
+            self.dynamic_gain_net.load_state_dict(dynamic_gain_net_dict)
+
+        if dynamic_gain_opt_dict is not None and self.dynamic_gain_optimizer is not None:
+            self.dynamic_gain_optimizer.load_state_dict(dynamic_gain_opt_dict)
 
     # ------------------------------------------------------------------
     # Optimizer
@@ -272,6 +314,19 @@ class GaussianModel:
             max_steps=training_args.iterations,
         )
 
+        self.dynamic_gain_optimizer = torch.optim.Adam(
+            self.dynamic_gain_net.parameters(),
+            lr=training_args.dynamic_gain_lr,
+            eps=1e-8,
+        )
+
+        self.dynamic_gain_scheduler_args = get_expon_lr_func(
+            lr_init=training_args.dynamic_gain_lr,
+            lr_final=training_args.dynamic_gain_lr_final,
+            lr_delay_mult=1.0,
+            max_steps=training_args.iterations,
+        )
+
     def update_learning_rate(self, iteration):
         for param_group in self.optimizer.param_groups:
             if param_group["name"] == "xyz":
@@ -283,6 +338,35 @@ class GaussianModel:
             elif param_group["name"] == "gain_mag":
                 lr = self.gain_scheduler_args(iteration)
                 param_group["lr"] = lr
+
+        if self.dynamic_gain_optimizer is not None:
+            dyn_lr = self.dynamic_gain_scheduler_args(iteration)
+            for param_group in self.dynamic_gain_optimizer.param_groups:
+                param_group["lr"] = dyn_lr
+
+    def get_dynamic_gain_weight(self, rx_pos: torch.Tensor) -> torch.Tensor:
+        """
+        Returns:
+            alpha_n * s_n(r), shape (N,1)
+        where
+            alpha_n = opacity_n
+            s_n(r)  = softplus(MLP([xyz, rx, xyz-rx, log1p(dist)]))
+        """
+        rx = rx_pos.view(1, 3).to(self.device, dtype=self.get_xyz.dtype)
+
+        xyz = self.get_xyz                      # (N,3)
+        rel = xyz - rx                         # (N,3)
+        dist = torch.norm(rel, dim=-1, keepdim=True).clamp(min=1e-6)
+        rx_rep = rx.expand(xyz.shape[0], -1)   # (N,3)
+
+        feat = torch.cat(
+            [xyz, rx_rep, rel, torch.log1p(dist)],
+            dim=-1
+        )                                      # (N,10)
+
+        dynamic_gain = F.softplus(self.dynamic_gain_net(feat))  # (N,1)
+        gain_weight = self.get_opacity * dynamic_gain
+        return gain_weight
 
     # ------------------------------------------------------------------
     # Statistics for pruning / densification

@@ -116,12 +116,14 @@ def hybrid_magnitude_loss(
         margin=rank_margin,
     )
 
-    total_loss = (
-        0.45 * abs_loss
-        + 0.20 * topk_loss
-        + 0.20 * bg_loss
-        + 0.15 * log_loss
-    )
+    # total_loss = (
+    #     0.45 * abs_loss
+    #     + 0.20 * topk_loss
+    #     + 0.20 * bg_loss
+    #     + 0.15 * log_loss
+    # )
+
+    total_loss = 0.7 * abs_loss + 0.3 * topk_loss
 
     if return_terms:
         target_power = torch.mean(target_n ** 2)
