@@ -18,31 +18,70 @@ from utils.general_utils import (
 
 from typing import Optional, Dict, Any
 
-class DynamicGainNet(nn.Module):
-    """
-    Per-Gaussian dynamic gain generator.
-    Input:
-        [xyz(3), rx(3), rel=xyz-rx(3), log1p(dist)(1)] -> 10 dims
-    Output:
-        scalar gain s_n(r) >= 0
-    """
-    def __init__(self, in_dim: int = 10, hidden_dim: int = 64, init_gain: float = 0.1):
+class FourierFeatures(nn.Module):
+    def __init__(self, in_dim=3, num_frequencies=6, include_input=True):
         super().__init__()
+        self.in_dim = in_dim
+        self.num_frequencies = num_frequencies
+        self.include_input = include_input
+        self.out_dim = in_dim * ((1 if include_input else 0) + 2 * num_frequencies)
+
+    def forward(self, x):
+        feats = [x] if self.include_input else []
+        for k in range(self.num_frequencies):
+            freq = (2.0 ** k) * math.pi
+            feats.append(torch.sin(freq * x))
+            feats.append(torch.cos(freq * x))
+        return torch.cat(feats, dim=-1)
+
+class DynamicGainNet(nn.Module):
+    def __init__(
+        self,
+        hidden_dim: int = 64,
+        init_gain: float = 0.1,
+        num_frequencies: int = 6,
+        include_input: bool = True,
+    ):
+        super().__init__()
+
+        self.pe = FourierFeatures(
+            in_dim=3,
+            num_frequencies=num_frequencies,
+            include_input=include_input,
+        )
+        
+        pe_dim = self.pe.out_dim
+        mlp_in_dim = pe_dim * 3 + 1
+
         self.net = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
+            nn.Linear(mlp_in_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, 1),
         )
 
-        # 처음엔 old base gain ~ 0.1 수준으로 시작
         nn.init.zeros_(self.net[-1].weight)
         init_bias = float(inverse_softplus(torch.tensor(init_gain)))
         nn.init.constant_(self.net[-1].bias, init_bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+        # x shape: (N, 10)
+        xyz = x[:, 0:3]
+        rx  = x[:, 3:6]
+        rel = x[:, 6:9]
+        logd = x[:, 9:10]
+
+        feat = torch.cat(
+            [
+                self.pe(xyz),
+                self.pe(rx),
+                self.pe(rel),
+                logd,
+            ],
+            dim=-1,
+        )
+        return self.net(feat)
 
 class GaussianModel:
     """MIMOGS Gaussian scene model
