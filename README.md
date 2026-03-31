@@ -5,7 +5,7 @@ MIMO channel rendering: A 3D-Gaussian Splatting Approach
 Create the basic environment
 ```python
 conda env create --file environment.yml
-conda activate wrfgsplus
+conda activate mimogs
 ```
 Install some extensions
 ```python
