@@ -14,6 +14,8 @@ from scene import Scene, GaussianModel
 from utils.general_utils import safe_state
 from torch.utils.data import DataLoader, Subset
 from utils.loss import (hybrid_magnitude_loss, magnitude_mse_loss, normalize_mag_map)
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+from matplotlib.ticker import FormatStrFormatter
 
 
 def prepare_output_dir(model_path: str):
@@ -79,7 +81,7 @@ def evaluate_and_save_random_test_samples(
                 rx_shape=(2, 2),
                 tx_shape=(4, 4),
                 normalize_beam_weights=False,
-                weight_floor=0.0,
+                weight_floor=1e-4,
             )
 
             pred_mag = out["render"]
@@ -90,24 +92,53 @@ def evaluate_and_save_random_test_samples(
             gt_mag_np = normalize_mag_map(magnitude).detach().cpu().numpy()
             pred_mag_np = pred_mag.detach().cpu().numpy()
 
-            fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+            # fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
+            # im0 = axes[0].imshow(gt_mag_np, aspect="equal", interpolation="nearest")
+            # axes[0].set_title("Ground Truth Shape (sample-wise normalized)")
+            # plt.colorbar(im0, ax=axes[0], fraction=0.03, pad=0.04)
+
+            # im1 = axes[1].imshow(pred_mag_np, aspect="equal", interpolation="nearest")
+            # axes[1].set_title("Predicted Shape (raw scale)")
+            # plt.colorbar(im1, ax=axes[1], fraction=0.03, pad=0.04)
+
+            # for ax in axes.ravel():
+            #     ax.set_xlabel("Tx beam index")
+            #     ax.set_ylabel("Rx beam index")
+            #     ax.set_aspect("equal")
+
+            # fig.suptitle(f"Test sample idx={idx}", fontsize=12)
+            # fig.tight_layout()
+
+            fig, axes = plt.subplots(2, 1, figsize=(8, 5), constrained_layout=True)
+
+            # Top: Ground Truth
             im0 = axes[0].imshow(gt_mag_np, aspect="equal", interpolation="nearest")
-            axes[0].set_title("Ground Truth Shape (sample-wise normalized)")
-            plt.colorbar(im0, ax=axes[0], fraction=0.03, pad=0.04)
+            axes[0].set_title("Ground Truth")
+            axes[0].set_xlabel("")
+            axes[0].set_ylabel("")
+            axes[0].set_aspect("equal")
 
+            divider0 = make_axes_locatable(axes[0])
+            cax0 = divider0.append_axes("right", size="3.5%", pad=0.08)
+
+            cbar0 = fig.colorbar(im0, cax=cax0)
+            cbar0.ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
+            cbar0.update_ticks()
+
+            # Bottom: Predicted
             im1 = axes[1].imshow(pred_mag_np, aspect="equal", interpolation="nearest")
-            axes[1].set_title("Predicted Shape (raw scale)")
-            plt.colorbar(im1, ax=axes[1], fraction=0.03, pad=0.04)
+            axes[1].set_title("Predicted")
+            axes[1].set_xlabel("")
+            axes[1].set_ylabel("")
+            axes[1].set_aspect("equal")
 
-            for ax in axes.ravel():
-                ax.set_xlabel("Tx beam index")
-                ax.set_ylabel("Rx beam index")
-                ax.set_aspect("equal")
-
-            fig.suptitle(f"Test sample idx={idx}", fontsize=12)
-            fig.tight_layout()
-
+            divider1 = make_axes_locatable(axes[1])
+            cax1 = divider1.append_axes("right", size="3.5%", pad=0.08)
+            cbar1 = fig.colorbar(im1, cax=cax1)
+            cbar1.ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
+            cbar1.update_ticks()
+            
             fig_path = os.path.join(save_dir, f"{rank:02d}.png")
             plt.savefig(fig_path, dpi=150)
             plt.close(fig)
@@ -161,7 +192,7 @@ def training(model_params, opt_params, raw_args):
     save_run_args_txt(model_params.model_path, model_params, opt_params, raw_args)
 
     gaussians = GaussianModel(
-        target_gaussians = 10_000,
+        target_gaussians = 50_000,
         optimizer_type = opt_params.optimizer_type,
         device = str(device),
         init_range = 1,
@@ -192,6 +223,9 @@ def training(model_params, opt_params, raw_args):
     else:
         gaussians.gaussian_init(vertices_path=None)
 
+    num_epochs = scene.num_epochs
+    total_iterations = len(scene.train_iter) * num_epochs
+    opt_params.position_lr_max_steps = int(0.6 * total_iterations) 
     gaussians.training_setup(opt_params)
 
     tx_pos = torch.tensor(
@@ -224,7 +258,7 @@ def training(model_params, opt_params, raw_args):
                     rx_shape=(2, 2),
                     tx_shape=(4, 4),
                     normalize_beam_weights=False,
-                    weight_floor=0.0,
+                    weight_floor=1e-4,
                 )
                 dbg_pred_mag = dbg_out["render"]
 
@@ -254,9 +288,6 @@ def training(model_params, opt_params, raw_args):
     print(f"[Debug] subset mean zero baseline: {zero_loss:.8f}")
     print(f"[Debug] subset mean init ratio_to_zero: {init_ratio:.8f}")
     ########################################################
-
-    num_epochs = scene.num_epochs
-    total_iterations = len(scene.train_iter) * num_epochs
 
     print(f"[Train] Device: {device}")
     print(f"[Train] Source path: {getattr(model_params, 'source_path', '')}")
@@ -291,7 +322,7 @@ def training(model_params, opt_params, raw_args):
                 rx_shape=(2, 2),
                 tx_shape=(4, 4),
                 normalize_beam_weights=False,
-                weight_floor=0.0,
+                weight_floor=1e-4,
             )
             pred_mag = out["render"]
 
@@ -299,21 +330,11 @@ def training(model_params, opt_params, raw_args):
 
             assert_finite("importance", importance, iteration)
 
-            loss, abs_loss_dbg, rel_loss_dbg, log_loss_dbg, topk_loss_dbg, bg_loss_dbg, rank_loss_dbg, gt_power_dbg = hybrid_magnitude_loss(
+            loss, abs_loss_dbg, topk_loss_dbg = hybrid_magnitude_loss(
                 pred_mag,
                 gt_mag,
-                alpha=0.3,
-                beta=0.2,
-                gamma=0.5,
-                lambda_topk=0.15,
-                lambda_bg=0.05,
-                lambda_rank=0.10,
-                topk_ratio=0.125,
-                bg_threshold=0.05,
-                rank_margin=0.05,
-                num_neg=32,
+                topk_ratio=0.0625,
                 eps=1e-8,
-                mag_scale=0.05,
                 return_terms=True,
             )
             assert_finite("loss", loss, iteration)
@@ -362,12 +383,7 @@ def training(model_params, opt_params, raw_args):
                     f"nums of gaussians: {gaussians.get_xyz.shape[0]}, "
                     f"Avg opacity: {avg_opacity:.4f}, "
                     f"abs_loss: {float(abs_loss_dbg):.8f}, "
-                    f"rel_loss: {float(rel_loss_dbg):.8f}, "
-                    f"log_loss: {float(log_loss_dbg):.8f}, "
                     f"topk_loss: {float(topk_loss_dbg):.8f}, "
-                    f"bg_loss: {float(bg_loss_dbg):.8f}, "
-                    f"rank_loss: {float(rank_loss_dbg):.8f}, "
-                    f"gt_power: {float(gt_power_dbg):.8f}"
                 )
 
             ema_loss = 0.4 * loss.item() + 0.6 * ema_loss
