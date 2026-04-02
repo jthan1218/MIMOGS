@@ -1,16 +1,20 @@
 name: mimogs
 channels:
   - pytorch
+  - nvidia
   - conda-forge
-  - defaults
 dependencies:
-  - cudatoolkit=11.6
-  - plyfile
-  - python=3.8.20
+  - python=3.8
   - pip=24.2
+
   - pytorch=1.13.1
-  - torchaudio=0.13.1
   - torchvision=0.14.1
+  - torchaudio=0.13.1
+  - pytorch-cuda=11.6
+
+  - mkl=2024.0.0
+  - pyyaml
+  - plyfile
   - tqdm
   - einops
   - imageio
@@ -19,9 +23,12 @@ dependencies:
   - pandas
   - scipy
   - scikit-image
+  - pillow
+  - libtiff
+
   - pip:
-    - submodules/diff-gaussian-rasterization
-    - submodules/simple-knn
-    - submodules/fused-ssim
     - opencv-python
     - joblib
+    # - submodules/diff-gaussian-rasterization
+    # - submodules/simple-knn
+    # - submodules/fused-ssim
