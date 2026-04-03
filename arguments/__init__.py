@@ -90,9 +90,9 @@ class OptimizationParams(ParamGroup):
         self.rotation_lr = 0.0005
         self.optimizer_type = "default"
 
-        self.gain_lr = 0.0025
+        # self.gain_lr = 0.0025
         self.opacity_lr_final = 0.003
-        self.gain_lr_final = 0.0003
+        # self.gain_lr_final = 0.0003
 
         # 추가
         self.dynamic_gain_lr = 0.001

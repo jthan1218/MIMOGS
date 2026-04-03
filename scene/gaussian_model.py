@@ -108,7 +108,7 @@ class GaussianModel:
         self._scaling = torch.empty(0, device = self.device)
         self._rotation = torch.empty(0, device = self.device)
         self._opacity = torch.empty(0, device = self.device)
-        self._gain_mag = torch.empty(0, device = self.device)
+        # self._gain_mag = torch.empty(0, device = self.device)
 
         self.optimizer = None
         self.xyz_scheduler_args = None
@@ -133,8 +133,8 @@ class GaussianModel:
 
         self.rotation_activation = lambda x: F.normalize(x, dim=-1)
 
-        self.gain_mag_activation = F.softplus
-        self.gain_mag_inverse_activation = inverse_softplus
+        # self.gain_mag_activation = F.softplus
+        # self.gain_mag_inverse_activation = inverse_softplus
 
         self.covariance_activation = build_covariance_from_scaling_rotation
 
@@ -155,13 +155,13 @@ class GaussianModel:
     def get_opacity(self):
         return self.opacity_activation(self._opacity)
 
-    @property
-    def get_gain_mag(self):
-        return self.gain_mag_activation(self._gain_mag)
+    # @property
+    # def get_gain_mag(self):
+    #     return self.gain_mag_activation(self._gain_mag)
 
-    @property
-    def get_gain_weight(self):
-        return self.get_opacity * self.get_gain_mag
+    # @property
+    # def get_gain_weight(self):
+    #     return self.get_opacity * self.get_gain_mag
 
     def get_covariance(self, scaling_modifier: float = 1.0):
         return self.covariance_activation(
@@ -231,15 +231,15 @@ class GaussianModel:
             0.1 * torch.ones((n_points, 1), dtype=torch.float32, device = self.device)
         )
 
-        gain_mag_raw = self.gain_mag_inverse_activation(
-            0.1 * torch.ones((n_points, 1), dtype = torch.float32, device = self.device)
-        )
+        # gain_mag_raw = self.gain_mag_inverse_activation(
+        #     0.1 * torch.ones((n_points, 1), dtype = torch.float32, device = self.device)
+        # )
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._scaling = nn.Parameter(scales_raw.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities_raw.requires_grad_(True))
-        self._gain_mag = nn.Parameter(gain_mag_raw.requires_grad_(True))
+        # self._gain_mag = nn.Parameter(gain_mag_raw.requires_grad_(True))
 
         self._reset_statistics()
         print(f"[GaussianModel] Number of points at initialization: {n_points}")
@@ -253,7 +253,7 @@ class GaussianModel:
             self._scaling.detach(),
             self._rotation.detach(),
             self._opacity.detach(),
-            self._gain_mag.detach(),
+            # self._gain_mag.detach(),
             self.xyz_gradient_accum.detach(),
             self.grad_denom.detach(),
             self.importance_accum.detach(),
@@ -273,7 +273,7 @@ class GaussianModel:
             scaling,
             rotation,
             opacity,
-            gain_mag,
+            # gain_mag,
             xyz_gradient_accum,
             grad_denom,
             importance_accum,
@@ -288,7 +288,7 @@ class GaussianModel:
         self._scaling = nn.Parameter(scaling.to(self.device).requires_grad_(True))
         self._rotation = nn.Parameter(rotation.to(self.device).requires_grad_(True))
         self._opacity = nn.Parameter(opacity.to(self.device).requires_grad_(True))
-        self._gain_mag = nn.Parameter(gain_mag.to(self.device).requires_grad_(True))
+        # self._gain_mag = nn.Parameter(gain_mag.to(self.device).requires_grad_(True))
 
         self.training_setup(training_args)
 
@@ -324,7 +324,7 @@ class GaussianModel:
             {"params": [self._opacity], "lr": training_args.opacity_lr, "name": "opacity"},
             {"params": [self._scaling], "lr": training_args.scaling_lr, "name": "scaling"},
             {"params": [self._rotation], "lr": training_args.rotation_lr, "name": "rotation"},
-            {"params": [self._gain_mag], "lr": training_args.gain_lr, "name": "gain_mag"},
+            # {"params": [self._gain_mag], "lr": training_args.gain_lr, "name": "gain_mag"},
         ]
 
         if getattr(training_args, "optimizer_type", self.optimizer_type) == "adamw":
@@ -346,12 +346,12 @@ class GaussianModel:
             max_steps=training_args.iterations,
         )
 
-        self.gain_scheduler_args = get_expon_lr_func(
-            lr_init=training_args.gain_lr,
-            lr_final=training_args.gain_lr_final,
-            lr_delay_mult=1.0,
-            max_steps=training_args.iterations,
-        )
+        # self.gain_scheduler_args = get_expon_lr_func(
+        #     lr_init=training_args.gain_lr,
+        #     lr_final=training_args.gain_lr_final,
+        #     lr_delay_mult=1.0,
+        #     max_steps=training_args.iterations,
+        # )
 
         self.dynamic_gain_optimizer = torch.optim.Adam(
             self.dynamic_gain_net.parameters(),
@@ -374,9 +374,9 @@ class GaussianModel:
             elif param_group["name"] == "opacity":
                 lr = self.opacity_scheduler_args(iteration)
                 param_group["lr"] = lr
-            elif param_group["name"] == "gain_mag":
-                lr = self.gain_scheduler_args(iteration)
-                param_group["lr"] = lr
+            # elif param_group["name"] == "gain_mag":
+            #     lr = self.gain_scheduler_args(iteration)
+            #     param_group["lr"] = lr
 
         if self.dynamic_gain_optimizer is not None:
             dyn_lr = self.dynamic_gain_scheduler_args(iteration)
@@ -440,7 +440,7 @@ class GaussianModel:
         attrs = ["x", "y", "z", "nx", "ny", "nz", "opacity"]
         attrs += [f"scale_{i}" for i in range(3)]
         attrs += [f"rot_{i}" for i in range(4)]
-        attrs += ["gain_mag"]
+        # attrs += ["gain_mag"]
         return attrs
 
     def save_ply(self, path: str):
@@ -451,13 +451,13 @@ class GaussianModel:
         opacities = self.get_opacity.detach().cpu().numpy()
         scales = self.get_scaling.detach().cpu().numpy()
         rotations = self.get_rotation.detach().cpu().numpy()
-        gain_mag = self.get_gain_mag.detach().cpu().numpy()
+        # gain_mag = self.get_gain_mag.detach().cpu().numpy()
 
         dtype_full = [(attribute, "f4") for attribute in self.construct_list_of_attributes()]
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
         attributes = np.concatenate(
-            [xyz, normals, opacities, scales, rotations, gain_mag], axis = 1
+            [xyz, normals, opacities, scales, rotations], axis = 1
         )
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, "vertex")
@@ -489,13 +489,13 @@ class GaussianModel:
         for idx, attr_name in enumerate(rot_names):
             rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
 
-        gain_mag = np.asarray(plydata.elements[0]["gain_mag"])[..., np.newaxis]
+        # gain_mag = np.asarray(plydata.elements[0]["gain_mag"])[..., np.newaxis]
 
         xyz_t = torch.tensor(xyz, dtype=torch.float32, device=self.device)
         opacity_t = torch.tensor(opacities, dtype=torch.float32, device=self.device)
         scale_t = torch.tensor(scales, dtype=torch.float32, device=self.device)
         rot_t = torch.tensor(rots, dtype=torch.float32, device=self.device)
-        gain_mag_t = torch.tensor(gain_mag, dtype=torch.float32, device=self.device)
+        # gain_mag_t = torch.tensor(gain_mag, dtype=torch.float32, device=self.device)
 
         self._xyz = nn.Parameter(xyz_t.requires_grad_(True))
         self._opacity = nn.Parameter(
@@ -505,9 +505,9 @@ class GaussianModel:
             self.scaling_inverse_activation(torch.clamp(scale_t, min=1e-8)).requires_grad_(True)
         )
         self._rotation = nn.Parameter(rot_t.requires_grad_(True))
-        self._gain_mag = nn.Parameter(
-            self.gain_mag_inverse_activation(torch.clamp(gain_mag_t, min=1e-8)).requires_grad_(True)
-        )
+        # self._gain_mag = nn.Parameter(
+        #     self.gain_mag_inverse_activation(torch.clamp(gain_mag_t, min=1e-8)).requires_grad_(True)
+        # )
 
         self._reset_statistics()
 
@@ -598,7 +598,7 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
-        self._gain_mag = optimizable_tensors["gain_mag"]
+        # self._gain_mag = optimizable_tensors["gain_mag"]
 
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
         self.grad_denom = self.grad_denom[valid_points_mask]
@@ -611,14 +611,14 @@ class GaussianModel:
         new_opacity: torch.Tensor,
         new_scaling: torch.Tensor,
         new_rotation: torch.Tensor,
-        new_gain_mag: torch.Tensor,
+        # new_gain_mag: torch.Tensor,
     ):
         tensors_dict = {
             "xyz": new_xyz,
             "opacity": new_opacity,
             "scaling": new_scaling,
             "rotation": new_rotation,
-            "gain_mag": new_gain_mag,
+            # "gain_mag": new_gain_mag,
         }
 
         optimizable_tensors = self.cat_tensors_to_optimizer(tensors_dict)
@@ -627,7 +627,7 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
-        self._gain_mag = optimizable_tensors["gain_mag"]
+        # self._gain_mag = optimizable_tensors["gain_mag"]
 
         self._reset_statistics()
 
@@ -657,11 +657,11 @@ class GaussianModel:
         new_opacity = self._opacity[selected_pts_mask].clone()
         new_scaling = self._scaling[selected_pts_mask].clone()
         new_rotation = self._rotation[selected_pts_mask].clone()
-        new_gain_mag = self._gain_mag[selected_pts_mask].clone()
+        # new_gain_mag = self._gain_mag[selected_pts_mask].clone()
 
 
         self.densification_postfix(
-            new_xyz, new_opacity, new_scaling, new_rotation, new_gain_mag
+            new_xyz, new_opacity, new_scaling, new_rotation
         )
 
     def densify_and_split(
@@ -706,10 +706,10 @@ class GaussianModel:
         )
         new_rotation = self.get_rotation[selected_pts_mask].repeat(n_splits, 1)
         new_opacity = self._opacity[selected_pts_mask].repeat(n_splits, 1)
-        new_gain_mag = self._gain_mag[selected_pts_mask].repeat(n_splits, 1)
+        # new_gain_mag = self._gain_mag[selected_pts_mask].repeat(n_splits, 1)
 
         self.densification_postfix(
-            new_xyz, new_opacity, new_scaling, new_rotation, new_gain_mag
+            new_xyz, new_opacity, new_scaling, new_rotation
         )
 
         prune_filter = torch.cat(
@@ -724,7 +724,7 @@ class GaussianModel:
         self,
         max_grad: float,
         min_opacity: float,
-        min_gain_mag: float,
+        # min_gain_mag: float,
         clone_scale_threshold: float,
         split_scale_threshold: float,
         importance_threshold: float = 0.0,
@@ -750,9 +750,9 @@ class GaussianModel:
         )
 
         prune_mask = (self.get_opacity.squeeze(-1) < min_opacity)
-        prune_mask = torch.logical_or(
-            prune_mask, self.get_gain_mag.squeeze(-1) < min_gain_mag
-        )
+        # prune_mask = torch.logical_or(
+        #     prune_mask, self.get_gain_mag.squeeze(-1) < min_gain_mag
+        # )
 
         if max_scale is not None:
             prune_mask = torch.logical_or(
