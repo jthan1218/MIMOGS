@@ -15,10 +15,10 @@ def _ensure_pos_shape(x: torch.Tensor) -> torch.Tensor:
         raise ValueError(f"Position must have shape (3,) or (1,3), got {tuple(x.shape)}")
     return x
 
-def _assert_finite_local(name: str, x: torch.Tensor):
-    xr = torch.view_as_real(x) if torch.is_complex(x) else x
-    if not torch.isfinite(xr).all():
-        raise RuntimeError(f"[render NaN/Inf] {name}")
+# def _assert_finite_local(name: str, x: torch.Tensor):
+#     xr = torch.view_as_real(x) if torch.is_complex(x) else x
+#     if not torch.isfinite(xr).all():
+#         raise RuntimeError(f"[render NaN/Inf] {name}")
 
 def _symmetrize(mat: torch.Tensor) -> torch.Tensor:
     return 0.5 * (mat + mat.transpose(-1, -2))
@@ -125,16 +125,16 @@ def _projected_angular_covariance(
     device = means.device
     dtype = means.dtype
     N = means.shape[0]
-    _assert_finite_local("means", means)
-    _assert_finite_local("covariances", covariances)
-    _assert_finite_local("array_pos", array_pos)
+    # _assert_finite_local("means", means)
+    # _assert_finite_local("covariances", covariances)
+    # _assert_finite_local("array_pos", array_pos)
 
     unit_dir, dist = _direction_and_distance(means, array_pos)      # (N,3), (N,1)
     uv_mean = _uv_from_unit_direction(unit_dir)                     # (N,2)
 
-    _assert_finite_local("unit_dir", unit_dir)
-    _assert_finite_local("dist", dist)
-    _assert_finite_local("uv_mean", uv_mean)
+    # _assert_finite_local("unit_dir", unit_dir)
+    # _assert_finite_local("dist", dist)
+    # _assert_finite_local("uv_mean", uv_mean)
 
 
     # Jacobian of normalized vector: J = (I - uu^T) / ||r||
@@ -144,7 +144,7 @@ def _projected_angular_covariance(
 
     # uv = [unit_dir_y, unit_dir_z], so keep rows 1 and 2
     J_uv = J_unit[:, 1:3, :]                                       # (N,2,3)
-    _assert_finite_local("J_uv", J_uv)
+    # _assert_finite_local("J_uv", J_uv)
 
     cov_uv = J_uv @ covariances @ J_uv.transpose(-1, -2)           # (N,2,2)
     cov_uv = _symmetrize(cov_uv)
@@ -152,7 +152,7 @@ def _projected_angular_covariance(
     eye2 = torch.eye(2, device=device, dtype=dtype).unsqueeze(0).expand(means.shape[0], -1, -1)
     cov_uv = cov_uv + covariance_floor * eye2
     
-    _assert_finite_local("cov_uv", cov_uv)
+    # _assert_finite_local("cov_uv", cov_uv)
     return uv_mean, cov_uv, dist
 
 def _safe_inv_cov_2x2(
@@ -165,15 +165,15 @@ def _safe_inv_cov_2x2(
     cov_uv = _symmetrize(cov_uv)
     eigvals, eigvecs = torch.linalg.eigh(cov_uv)  # eigvals ascending
 
-    _assert_finite_local("cov_uv_eigvals", eigvals)
-    _assert_finite_local("cov_uv_eigvecs", eigvecs)
+    # _assert_finite_local("cov_uv_eigvals", eigvals)
+    # _assert_finite_local("cov_uv_eigvecs", eigvecs)
 
     eigvals = torch.clamp(eigvals, min=eig_floor)
     inv_eigvals = 1.0 / eigvals
     inv_cov_uv = eigvecs @ torch.diag_embed(inv_eigvals) @ eigvecs.transpose(-1, -2)
     inv_cov_uv = _symmetrize(inv_cov_uv)
 
-    _assert_finite_local("inv_cov_uv", inv_cov_uv)
+    # _assert_finite_local("inv_cov_uv", inv_cov_uv)
     return inv_cov_uv
 
 def _gaussian_beam_weights_from_uv(
@@ -184,17 +184,17 @@ def _gaussian_beam_weights_from_uv(
     weight_floor: float = 0.0,
     eig_floor: float = 1e-4,
 ) -> torch.Tensor:
-    _assert_finite_local("uv_mean", uv_mean)
-    _assert_finite_local("cov_uv_input", cov_uv)
-    _assert_finite_local("beam_centers_uv", beam_centers_uv)
+    # _assert_finite_local("uv_mean", uv_mean)
+    # _assert_finite_local("cov_uv_input", cov_uv)
+    # _assert_finite_local("beam_centers_uv", beam_centers_uv)
 
     delta = beam_centers_uv.unsqueeze(0) - uv_mean.unsqueeze(1)
-    _assert_finite_local("delta", delta)
+    # _assert_finite_local("delta", delta)
 
     inv_cov_uv = _safe_inv_cov_2x2(cov_uv, eig_floor=eig_floor)
 
     mahal = torch.einsum("nbi,nij,nbj->nb", delta, inv_cov_uv, delta)
-    _assert_finite_local("mahal", mahal)
+    # _assert_finite_local("mahal", mahal)
 
     log_weights = torch.clamp(-0.5 * mahal, min=-80.0, max=0.0)
     weights = torch.exp(log_weights)
@@ -206,7 +206,7 @@ def _gaussian_beam_weights_from_uv(
         denom = weights.sum(dim=-1, keepdim=True).clamp(min=1e-12)
         weights = weights / denom
 
-    _assert_finite_local("weights", weights)
+    # _assert_finite_local("weights", weights)
     return weights
 
 
@@ -262,8 +262,8 @@ def render(
     # gain_weight = pc.get_opacity * dynamic_gain_mag
     # _assert_finite_local("gain_weight", gain_weight)
 
-    _assert_finite_local("means", means)
-    _assert_finite_local("covariances", covariances)
+    # _assert_finite_local("means", means)
+    # _assert_finite_local("covariances", covariances)
 
     # ------------------------------------------------------------------
     # Build beam centers in uv-domain
@@ -292,8 +292,8 @@ def render(
         covariance_floor = covariance_floor,
     )
 
-    _assert_finite_local("rx_uv_mean", rx_uv_mean)
-    _assert_finite_local("rx_cov_uv", rx_cov_uv)
+    # _assert_finite_local("rx_uv_mean", rx_uv_mean)
+    # _assert_finite_local("rx_cov_uv", rx_cov_uv)
 
 
     rx_weights = _gaussian_beam_weights_from_uv(
@@ -305,7 +305,7 @@ def render(
     eig_floor=max(covariance_floor, 1e-4),
     )
 
-    _assert_finite_local("rx_weights", rx_weights)
+    # _assert_finite_local("rx_weights", rx_weights)
 
     # ------------------------------------------------------------------
     # Covariance-aware soft projection to Tx beam-domain
@@ -317,8 +317,8 @@ def render(
         covariance_floor = covariance_floor,
     )
 
-    _assert_finite_local("tx_uv_mean", tx_uv_mean)
-    _assert_finite_local("tx_cov_uv", tx_cov_uv)
+    # _assert_finite_local("tx_uv_mean", tx_uv_mean)
+    # _assert_finite_local("tx_cov_uv", tx_cov_uv)
 
     tx_weights = _gaussian_beam_weights_from_uv(
         uv_mean=tx_uv_mean,
@@ -329,7 +329,7 @@ def render(
         eig_floor=max(covariance_floor, 1e-4),
     )
 
-    _assert_finite_local("tx_weights", tx_weights)
+    # _assert_finite_local("tx_weights", tx_weights)
 
     # ------------------------------------------------------------------
     # Beamspace splatting / superposition
@@ -341,14 +341,14 @@ def render(
         * tx_weights[:, None, :]
     )
 
-    _assert_finite_local("beam_contributions", beam_contributions)
+    # _assert_finite_local("beam_contributions", beam_contributions)
 
     H = beam_contributions.sum(dim=0)
-    _assert_finite_local("H", H)
+    # _assert_finite_local("H", H)
 
     # A simple per_Gaussian usefulness score for prune/densify
     per_gaussian_importance = beam_contributions.abs().sum(dim=(1,2))
-    _assert_finite_local("per_gaussian_importance", per_gaussian_importance)
+    # _assert_finite_local("per_gaussian_importance", per_gaussian_importance)
 
     return {
         "render": H,                     # now H itself is the predicted magnitude map

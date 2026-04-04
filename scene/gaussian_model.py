@@ -26,13 +26,33 @@ class FourierFeatures(nn.Module):
         self.include_input = include_input
         self.out_dim = in_dim * ((1 if include_input else 0) + 2 * num_frequencies)
 
-    def forward(self, x):
-        feats = [x] if self.include_input else []
-        for k in range(self.num_frequencies):
-            freq = (2.0 ** k) * math.pi
-            feats.append(torch.sin(freq * x))
-            feats.append(torch.cos(freq * x))
-        return torch.cat(feats, dim=-1)
+        freq_bands = (2.0 ** torch.arange(num_frequencies, dtype=torch.float32)) * math.pi
+        self.register_buffer("freq_bands", freq_bands, persistent=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: (..., in_dim)
+        [x, sin(f0*x), cos(f0*x), sin(f1*x), cos(f1*x), ...]
+        """
+        if self.num_frequencies == 0:
+            if self.include_input:
+                return x
+            return x.new_empty(*x.shape[:-1], 0)
+
+        freq_bands = self.freq_bands.to(device=x.device, dtype=x.dtype)
+
+        # (..., F, D)
+        x_proj = x.unsqueeze(-2) * freq_bands.view(*([1] * (x.dim() - 1)), -1, 1)
+
+        sin_part = torch.sin(x_proj)
+        cos_part = torch.cos(x_proj)
+
+        # (..., F, 2, D) -> (..., 2*F*D)
+        fourier = torch.stack((sin_part, cos_part), dim=-2).reshape(*x.shape[:-1], -1)
+
+        if self.include_input:
+            return torch.cat([x, fourier], dim=-1)
+        return fourier
 
 class DynamicGainNet(nn.Module):
     def __init__(

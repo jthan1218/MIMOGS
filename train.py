@@ -360,13 +360,14 @@ def training(model_params, opt_params, raw_args):
             #             max_scale = None,
             #             n_splits = 2,
             #         )
-
-            dyn_grad_norm = 0.0
-            for p in gaussians.dynamic_gain_net.parameters():
-                if p.grad is not None:
-                    dyn_grad_norm += p.grad.norm().item()
             
             if iteration > 1000 and iteration % 1000 == 0:
+
+                dyn_grad_norm = 0.0
+                for p in gaussians.dynamic_gain_net.parameters():
+                    if p.grad is not None:
+                        dyn_grad_norm += p.grad.norm().item()
+
                 with torch.no_grad():
                     print(
                         f"grad xyz={gaussians._xyz.grad.norm().item():.3e}, "
