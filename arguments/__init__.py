@@ -62,6 +62,9 @@ class ModelParams(ParamGroup):
 
         self.init_mode = "random"
         self.vertices_path = ""
+        self.max_active_rx_beams = 2
+        self.max_active_tx_beams = 2
+        self.renormalize_local_beam_weights = True
 
         super().__init__(parser, "Model Parameters", sentinel)
 

@@ -210,6 +210,41 @@ def _gaussian_beam_weights_from_uv(
     return weights
 
 
+def _truncate_to_local_topk(
+    weights: torch.Tensor,
+    max_active_beams: int,
+    renormalize: bool = True,
+) -> torch.Tensor:
+    """
+    Keep only local top-k beam weights per Gaussian.
+
+    Args:
+        weights: (N, B)
+        max_active_beams: maximum number of non-zero beams per Gaussian
+        renormalize: if True, re-normalize kept entries to sum to 1
+    """
+    if weights.dim() != 2:
+        raise ValueError(f"weights must have shape (N, B), got {tuple(weights.shape)}")
+
+    num_beams = weights.shape[1]
+    k = int(max_active_beams)
+
+    if k >= num_beams:
+        return weights
+    if k <= 0:
+        return torch.zeros_like(weights)
+
+    topk_values, topk_indices = torch.topk(weights, k=k, dim=-1, largest=True, sorted=False)
+    truncated = torch.zeros_like(weights)
+    truncated.scatter_(dim=-1, index=topk_indices, src=topk_values)
+
+    if renormalize:
+        denom = truncated.sum(dim=-1, keepdim=True).clamp(min=1e-12)
+        truncated = truncated / denom
+
+    return truncated
+
+
 def render(
     rx_pos: torch.Tensor,
     tx_pos: torch.Tensor,
@@ -220,6 +255,9 @@ def render(
     normalize_beam_weights: bool = True,
     covariance_floor: float = 1e-4,
     weight_floor: float = 0.0,
+    max_active_rx_beams: int = 2,
+    max_active_tx_beams: int = 2,
+    renormalize_local_beam_weights: bool = True,
 ) -> Dict[str, torch.Tensor]:
     """
     MIMOGS beamspace renderer.
@@ -304,6 +342,11 @@ def render(
     weight_floor=weight_floor,
     eig_floor=max(covariance_floor, 1e-4),
     )
+    rx_weights = _truncate_to_local_topk(
+        rx_weights,
+        max_active_beams=max_active_rx_beams,
+        renormalize=renormalize_local_beam_weights,
+    )
 
     # _assert_finite_local("rx_weights", rx_weights)
 
@@ -327,6 +370,11 @@ def render(
         normalize=normalize_beam_weights,
         weight_floor=weight_floor,
         eig_floor=max(covariance_floor, 1e-4),
+    )
+    tx_weights = _truncate_to_local_topk(
+        tx_weights,
+        max_active_beams=max_active_tx_beams,
+        renormalize=renormalize_local_beam_weights,
     )
 
     # _assert_finite_local("tx_weights", tx_weights)

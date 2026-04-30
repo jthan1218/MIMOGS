@@ -82,6 +82,9 @@ def evaluate_and_save_random_test_samples(
                 tx_shape=(4, 4),
                 normalize_beam_weights=False,
                 weight_floor=1e-4,
+                max_active_rx_beams=getattr(model_params, "max_active_rx_beams", 2),
+                max_active_tx_beams=getattr(model_params, "max_active_tx_beams", 2),
+                renormalize_local_beam_weights=getattr(model_params, "renormalize_local_beam_weights", True),
             )
 
             pred_mag = out["render"]
@@ -192,7 +195,7 @@ def training(model_params, opt_params, raw_args):
     save_run_args_txt(model_params.model_path, model_params, opt_params, raw_args)
 
     gaussians = GaussianModel(
-        target_gaussians = 30_000,
+        target_gaussians = 15_000,
         optimizer_type = opt_params.optimizer_type,
         device = str(device),
         init_range = 1,
@@ -259,6 +262,9 @@ def training(model_params, opt_params, raw_args):
                     tx_shape=(4, 4),
                     normalize_beam_weights=False,
                     weight_floor=1e-4,
+                    max_active_rx_beams=getattr(model_params, "max_active_rx_beams", 2),
+                    max_active_tx_beams=getattr(model_params, "max_active_tx_beams", 2),
+                    renormalize_local_beam_weights=getattr(model_params, "renormalize_local_beam_weights", True),
                 )
                 dbg_pred_mag = dbg_out["render"]
 
@@ -323,6 +329,9 @@ def training(model_params, opt_params, raw_args):
                 tx_shape=(4, 4),
                 normalize_beam_weights=False,
                 weight_floor=1e-4,
+                max_active_rx_beams=getattr(model_params, "max_active_rx_beams", 2),
+                max_active_tx_beams=getattr(model_params, "max_active_tx_beams", 2),
+                renormalize_local_beam_weights=getattr(model_params, "renormalize_local_beam_weights", True),
             )
             pred_mag = out["render"]
 
