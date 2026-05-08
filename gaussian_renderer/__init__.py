@@ -6,14 +6,14 @@ import torch
 from scene.gaussian_model import GaussianModel
 
 
-def _ensure_pos_shape(x: torch.Tensor) -> torch.Tensor:
-    """Accepts shape (3,) or (1,3), returns shape (3,)"""
+# def _ensure_pos_shape(x: torch.Tensor) -> torch.Tensor:
+#     """Accepts shape (3,) or (1,3), returns shape (3,)"""
 
-    if x.dim() == 2 and x.shape[0] == 1:
-        x = x.squeeze(0)
-    if x.dim() != 1 or x.shape[0] != 3:
-        raise ValueError(f"Position must have shape (3,) or (1,3), got {tuple(x.shape)}")
-    return x
+#     if x.dim() == 2 and x.shape[0] == 1:
+#         x = x.squeeze(0)
+#     if x.dim() != 1 or x.shape[0] != 3:
+#         raise ValueError(f"Position must have shape (3,) or (1,3), got {tuple(x.shape)}")
+#     return x
 
 # def _assert_finite_local(name: str, x: torch.Tensor):
 #     xr = torch.view_as_real(x) if torch.is_complex(x) else x
@@ -35,31 +35,32 @@ def _build_dft_uv_bins(num_elem: int, device, dtype) -> torch.Tensor:
     return 2.0 * torch.fft.fftfreq(num_elem, d=1.0, device=device).to(dtype)
 
 
+_BEAM_UV_GRID_CACHE = {}
+
+def _beam_grid_cache_key(horizontal: int, vertical: int, device, dtype):
+    return (int(horizontal), int(vertical), str(device), str(dtype))
+
 def _build_beam_uv_grid(
     horizontal: int,
     vertical: int,
     device,
     dtype,
 ) -> torch.Tensor:
-    """
-    Build beam-center grid in uv domain.
+    key = _beam_grid_cache_key(horizontal, vertical, device, dtype)
 
-    Ordering matches kron(A_y, A_x):
-        fast index = horizontal
-        slow index = vertical
+    cached = _BEAM_UV_GRID_CACHE.get(key, None)
+    if cached is not None:
+        return cached
 
-    Returns:
-        centers_uv: (vertical, horizontal, 2)
-                    columns are [u_horizontal, v_vertical]
-    """
-
-    u_bins = _build_dft_uv_bins(horizontal, device = device, dtype = dtype) # x/horizontal fast
-    v_bins = _build_dft_uv_bins(vertical, device = device, dtype = dtype)   # y/vertical slow
+    u_bins = _build_dft_uv_bins(horizontal, device=device, dtype=dtype)
+    v_bins = _build_dft_uv_bins(vertical, device=device, dtype=dtype)
 
     u_grid = u_bins.repeat(vertical)
     v_grid = v_bins.repeat_interleave(horizontal)
 
-    centers_uv = torch.stack([u_grid, v_grid], dim = -1)
+    centers_uv = torch.stack([u_grid, v_grid], dim=-1)
+    _BEAM_UV_GRID_CACHE[key] = centers_uv
+
     return centers_uv
 
 
@@ -100,81 +101,140 @@ def _uv_from_unit_direction(unit_dir: torch.Tensor) -> torch.Tensor:
 
     return torch.stack([u,v], dim=-1)
 
-def _projected_angular_covariance(
-    means: torch.Tensor,            # (N,3)
-    covariances: torch.Tensor,      # (N,3,3)
-    array_pos: torch.Tensor,        # (3,)
-    covariance_floor: float = 1e-6,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Covariance-aware projection from 3D Gaussian to uv domain.
-
-    Uses first-order projection:
-        unit_dir = (x - p) / ||x - p||
-        uv = [unit_dir_y, unit_dir, z]
-        Sigma_uv = J_uv Sigma_xyz J_uv^T
-
-    where J_uv is the Jacobian of uv w.r.t xyz evaluated at the mean.
-
-    Returns:
-        uv_mean: (N,2)
-        cov_uv:  (N,2,2)
-        dist:    (N,1)
-    """
-
-    device = means.device
-    dtype = means.dtype
-    N = means.shape[0]
-    # _assert_finite_local("means", means)
-    # _assert_finite_local("covariances", covariances)
-    # _assert_finite_local("array_pos", array_pos)
-
-    unit_dir, dist = _direction_and_distance(means, array_pos)      # (N,3), (N,1)
-    uv_mean = _uv_from_unit_direction(unit_dir)                     # (N,2)
-
-    # _assert_finite_local("unit_dir", unit_dir)
-    # _assert_finite_local("dist", dist)
-    # _assert_finite_local("uv_mean", uv_mean)
-
-
-    # Jacobian of normalized vector: J = (I - uu^T) / ||r||
-    eye3 = torch.eye(3, device = device, dtype = dtype).unsqueeze(0).expand(means.shape[0], -1, -1)
-    uuT = unit_dir.unsqueeze(-1) @ unit_dir.unsqueeze(-2)           # (N,3,3)
-    J_unit = (eye3 - uuT) / dist.unsqueeze(-1)                      # (N,3,3)
-
-    # uv = [unit_dir_y, unit_dir_z], so keep rows 1 and 2
-    J_uv = J_unit[:, 1:3, :]                                       # (N,2,3)
-    # _assert_finite_local("J_uv", J_uv)
-
-    cov_uv = J_uv @ covariances @ J_uv.transpose(-1, -2)           # (N,2,2)
-    cov_uv = _symmetrize(cov_uv)
-
-    eye2 = torch.eye(2, device=device, dtype=dtype).unsqueeze(0).expand(means.shape[0], -1, -1)
-    cov_uv = cov_uv + covariance_floor * eye2
-    
-    # _assert_finite_local("cov_uv", cov_uv)
-    return uv_mean, cov_uv, dist
-
 def _safe_inv_cov_2x2(
     cov_uv: torch.Tensor,
     eig_floor: float = 1e-4,
 ) -> torch.Tensor:
     """
-    Stable inverse for symmetric 2x2 covariance matrices using eigendecomposition.
+    Fast eigenvalue-clamped inverse for symmetric 2x2 covariance matrices.
+
+    Mathematically equivalent to:
+        eigvals, eigvecs = torch.linalg.eigh(cov_uv)
+        eigvals = clamp(eigvals, min=eig_floor)
+        inv = eigvecs @ diag(1/eigvals) @ eigvecs.T
+
+    but avoids torch.linalg.eigh.
     """
     cov_uv = _symmetrize(cov_uv)
-    eigvals, eigvecs = torch.linalg.eigh(cov_uv)  # eigvals ascending
 
-    # _assert_finite_local("cov_uv_eigvals", eigvals)
-    # _assert_finite_local("cov_uv_eigvecs", eigvecs)
+    a = cov_uv[:, 0, 0]
+    b = cov_uv[:, 0, 1]
+    c = cov_uv[:, 1, 1]
 
-    eigvals = torch.clamp(eigvals, min=eig_floor)
-    inv_eigvals = 1.0 / eigvals
-    inv_cov_uv = eigvecs @ torch.diag_embed(inv_eigvals) @ eigvecs.transpose(-1, -2)
-    inv_cov_uv = _symmetrize(inv_cov_uv)
+    trace_half = 0.5 * (a + c)
+    diff_half = 0.5 * (a - c)
+    radius = torch.sqrt(torch.clamp(diff_half * diff_half + b * b, min=0.0))
 
-    # _assert_finite_local("inv_cov_uv", inv_cov_uv)
+    lam_hi = trace_half + radius
+    lam_lo = trace_half - radius
+
+    inv_hi = 1.0 / torch.clamp(lam_hi, min=eig_floor)
+    inv_lo = 1.0 / torch.clamp(lam_lo, min=eig_floor)
+
+    # Matrix function f(C) = alpha I + beta B,
+    # where C = trace_half I + B and B has eigenvalues +/- radius.
+    alpha = 0.5 * (inv_hi + inv_lo)
+
+    beta = torch.where(
+        radius > 1e-12,
+        0.5 * (inv_hi - inv_lo) / radius,
+        torch.zeros_like(radius),
+    )
+
+    inv00 = alpha + beta * diff_half
+    inv01 = beta * b
+    inv11 = alpha - beta * diff_half
+
+    inv_cov_uv = torch.stack(
+        [
+            torch.stack([inv00, inv01], dim=-1),
+            torch.stack([inv01, inv11], dim=-1),
+        ],
+        dim=-2,
+    )
+
     return inv_cov_uv
+
+def _projected_angular_covariance(
+    means: torch.Tensor,
+    covariances: torch.Tensor,
+    array_pos: torch.Tensor,
+    covariance_floor: float = 1e-6,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Fast covariance-aware projection from 3D Gaussian to uv domain.
+
+    Same projection as the original:
+        unit_dir = (x - p) / ||x - p||
+        uv = [unit_dir_y, unit_dir_z]
+        Sigma_uv = J_uv Sigma_xyz J_uv^T
+
+    but avoids materializing N×3×3 eye/Jacobian tensors.
+    """
+    rel = means - array_pos.unsqueeze(0)
+
+    dist2 = (rel * rel).sum(dim=-1, keepdim=True).clamp(min=1e-16)
+    inv_dist = torch.rsqrt(dist2)
+    dist = torch.sqrt(dist2)
+
+    unit_dir = rel * inv_dist
+    uv_mean = unit_dir[:, 1:3]
+
+    sx = unit_dir[:, 0]
+    sy = unit_dir[:, 1]
+    sz = unit_dir[:, 2]
+    inv_d = inv_dist.squeeze(-1)
+
+    # Rows of J_uv = rows 1 and 2 of (I - ss^T) / ||r||
+    jy0 = (-sy * sx) * inv_d
+    jy1 = (1.0 - sy * sy) * inv_d
+    jy2 = (-sy * sz) * inv_d
+
+    jz0 = (-sz * sx) * inv_d
+    jz1 = (-sz * sy) * inv_d
+    jz2 = (1.0 - sz * sz) * inv_d
+
+    # Use symmetric part of covariance, matching original symmetrized output.
+    c00 = covariances[:, 0, 0]
+    c11 = covariances[:, 1, 1]
+    c22 = covariances[:, 2, 2]
+    c01 = 0.5 * (covariances[:, 0, 1] + covariances[:, 1, 0])
+    c02 = 0.5 * (covariances[:, 0, 2] + covariances[:, 2, 0])
+    c12 = 0.5 * (covariances[:, 1, 2] + covariances[:, 2, 1])
+
+    def qform(a0, a1, a2):
+        return (
+            c00 * a0 * a0
+            + c11 * a1 * a1
+            + c22 * a2 * a2
+            + 2.0 * c01 * a0 * a1
+            + 2.0 * c02 * a0 * a2
+            + 2.0 * c12 * a1 * a2
+        )
+
+    def biform(a0, a1, a2, b0, b1, b2):
+        return (
+            c00 * a0 * b0
+            + c11 * a1 * b1
+            + c22 * a2 * b2
+            + c01 * (a0 * b1 + a1 * b0)
+            + c02 * (a0 * b2 + a2 * b0)
+            + c12 * (a1 * b2 + a2 * b1)
+        )
+
+    cov00 = qform(jy0, jy1, jy2) + covariance_floor
+    cov01 = biform(jy0, jy1, jy2, jz0, jz1, jz2)
+    cov11 = qform(jz0, jz1, jz2) + covariance_floor
+
+    cov_uv = torch.stack(
+        [
+            torch.stack([cov00, cov01], dim=-1),
+            torch.stack([cov01, cov11], dim=-1),
+        ],
+        dim=-2,
+    )
+
+    return uv_mean, cov_uv, dist
 
 def _gaussian_beam_weights_from_uv(
     uv_mean: torch.Tensor,
@@ -184,19 +244,19 @@ def _gaussian_beam_weights_from_uv(
     weight_floor: float = 0.0,
     eig_floor: float = 1e-4,
 ) -> torch.Tensor:
-    # _assert_finite_local("uv_mean", uv_mean)
-    # _assert_finite_local("cov_uv_input", cov_uv)
-    # _assert_finite_local("beam_centers_uv", beam_centers_uv)
-
-    delta = beam_centers_uv.unsqueeze(0) - uv_mean.unsqueeze(1)
-    # _assert_finite_local("delta", delta)
-
     inv_cov_uv = _safe_inv_cov_2x2(cov_uv, eig_floor=eig_floor)
 
-    mahal = torch.einsum("nbi,nij,nbj->nb", delta, inv_cov_uv, delta)
-    # _assert_finite_local("mahal", mahal)
+    dx = beam_centers_uv[:, 0].unsqueeze(0) - uv_mean[:, 0].unsqueeze(1)
+    dy = beam_centers_uv[:, 1].unsqueeze(0) - uv_mean[:, 1].unsqueeze(1)
+
+    inv00 = inv_cov_uv[:, 0, 0].unsqueeze(1)
+    inv01 = inv_cov_uv[:, 0, 1].unsqueeze(1)
+    inv11 = inv_cov_uv[:, 1, 1].unsqueeze(1)
+
+    mahal = inv00 * dx * dx + 2.0 * inv01 * dx * dy + inv11 * dy * dy
 
     log_weights = torch.clamp(-0.5 * mahal, min=-80.0, max=0.0)
+
     weights = torch.exp(log_weights)
 
     if weight_floor > 0.0:
@@ -206,7 +266,6 @@ def _gaussian_beam_weights_from_uv(
         denom = weights.sum(dim=-1, keepdim=True).clamp(min=1e-12)
         weights = weights / denom
 
-    # _assert_finite_local("weights", weights)
     return weights
 
 
@@ -287,8 +346,8 @@ def render(
         "beam_contributions"    : (N, Nr, Nt)
     """
 
-    rx_pos = _ensure_pos_shape(rx_pos).to(pc.get_xyz.device, dtype=pc.get_xyz.dtype)
-    tx_pos = _ensure_pos_shape(tx_pos).to(pc.get_xyz.device, dtype=pc.get_xyz.dtype)
+    # rx_pos = _ensure_pos_shape(rx_pos).to(pc.get_xyz.device, dtype=pc.get_xyz.dtype)
+    # tx_pos = _ensure_pos_shape(tx_pos).to(pc.get_xyz.device, dtype=pc.get_xyz.dtype)
 
     # means = pc.get_xyz      # (N,3)
     # covariances = pc.get_covariance(scaling_modifier) # (N,3,3)
@@ -348,8 +407,6 @@ def render(
         renormalize=renormalize_local_beam_weights,
     )
 
-    # _assert_finite_local("rx_weights", rx_weights)
-
     # ------------------------------------------------------------------
     # Covariance-aware soft projection to Tx beam-domain
     # ------------------------------------------------------------------
@@ -359,10 +416,6 @@ def render(
         array_pos = tx_pos,
         covariance_floor = covariance_floor,
     )
-
-    # _assert_finite_local("tx_uv_mean", tx_uv_mean)
-    # _assert_finite_local("tx_cov_uv", tx_cov_uv)
-
     tx_weights = _gaussian_beam_weights_from_uv(
         uv_mean=tx_uv_mean,
         cov_uv=tx_cov_uv,
@@ -377,33 +430,26 @@ def render(
         renormalize=renormalize_local_beam_weights,
     )
 
-    # _assert_finite_local("tx_weights", tx_weights)
-
     # ------------------------------------------------------------------
     # Beamspace splatting / superposition
     # H_n[p,q] = c_n * r_n[p] * t_n[q]
     # ------------------------------------------------------------------ 
-    beam_contributions = (
-        gain_weight.view(-1, 1, 1)
-        * rx_weights[:, :, None]
-        * tx_weights[:, None, :]
-    )
+    gain = gain_weight.reshape(-1)  # (N,)
 
-    # _assert_finite_local("beam_contributions", beam_contributions)
+    H = rx_weights.transpose(0, 1) @ (tx_weights * gain[:, None])
 
-    H = beam_contributions.sum(dim=0)
-    # _assert_finite_local("H", H)
-
-    # A simple per_Gaussian usefulness score for prune/densify
-    per_gaussian_importance = beam_contributions.abs().sum(dim=(1,2))
-    # _assert_finite_local("per_gaussian_importance", per_gaussian_importance)
+    with torch.no_grad():
+        per_gaussian_importance = (
+            gain.detach().abs()
+            * rx_weights.detach().sum(dim=1)
+            * tx_weights.detach().sum(dim=1)
+        )
 
     return {
-        "render": H,                     # now H itself is the predicted magnitude map
+        "render": H,
         "magnitude": H,
         "rx_weights": rx_weights,
         "tx_weights": tx_weights,
         "per_gaussian_importance": per_gaussian_importance,
-        "beam_contributions": beam_contributions,
         "gain_weight": gain_weight,
     }

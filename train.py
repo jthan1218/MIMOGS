@@ -195,7 +195,7 @@ def training(model_params, opt_params, raw_args):
     save_run_args_txt(model_params.model_path, model_params, opt_params, raw_args)
 
     gaussians = GaussianModel(
-        target_gaussians = 15_000,
+        target_gaussians = 25_000,
         optimizer_type = opt_params.optimizer_type,
         device = str(device),
         init_range = 1,
