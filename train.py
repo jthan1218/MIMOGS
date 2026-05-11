@@ -164,23 +164,6 @@ def get_avg_opacity(gaussians) -> float:
 
         return float(opacity.detach().mean().item())
 
-def _finite_ratio(x: torch.Tensor) -> float:
-    if torch.is_complex(x):
-        xr = torch.view_as_real(x.detach())
-    else:
-        xr = x.detach()
-    return float(torch.isfinite(xr).float().mean().item())
-
-def assert_finite(name: str, x: torch.Tensor, iteration: int):
-    xr = torch.view_as_real(x) if torch.is_complex(x) else x
-    if not torch.isfinite(xr).all():
-        raise RuntimeError(
-            f"[NaN/Inf detected] {name} at iter={iteration}, "
-            f"finite_ratio={_finite_ratio(x):.6f}, "
-            f"shape={tuple(x.shape)}, dtype={x.dtype}, device={x.device}"
-        )
-
-
 
 ########################################################
 # Training loop
@@ -318,9 +301,6 @@ def training(model_params, opt_params, raw_args):
 
             gt_mag = magnitude.reshape(scene.beam_rows, scene.beam_cols)
 
-            assert_finite("magnitude", magnitude, iteration)
-            assert_finite("rx_pos", rx_pos, iteration)
-
             out = render(
                 rx_pos=rx_pos,
                 tx_pos=tx_pos,
@@ -337,8 +317,6 @@ def training(model_params, opt_params, raw_args):
 
             importance = out["per_gaussian_importance"]
 
-            assert_finite("importance", importance, iteration)
-
             loss, abs_loss_dbg, topk_loss_dbg = hybrid_magnitude_loss(
                 pred_mag,
                 gt_mag,
@@ -346,7 +324,6 @@ def training(model_params, opt_params, raw_args):
                 eps=1e-8,
                 return_terms=True,
             )
-            assert_finite("loss", loss, iteration)
 
             gaussians.optimizer.zero_grad(set_to_none=True)
             gaussians.dynamic_gain_optimizer.zero_grad(set_to_none=True)

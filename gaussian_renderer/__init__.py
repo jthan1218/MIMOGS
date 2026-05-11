@@ -20,9 +20,6 @@ from scene.gaussian_model import GaussianModel
 #     if not torch.isfinite(xr).all():
 #         raise RuntimeError(f"[render NaN/Inf] {name}")
 
-def _symmetrize(mat: torch.Tensor) -> torch.Tensor:
-    return 0.5 * (mat + mat.transpose(-1, -2))
-
 def _build_dft_uv_bins(num_elem: int, device, dtype) -> torch.Tensor:
     """
     Spatial-frequency bins corresponding to unshifted DFT ordering.
@@ -102,28 +99,25 @@ def _uv_from_unit_direction(unit_dir: torch.Tensor) -> torch.Tensor:
     return torch.stack([u,v], dim=-1)
 
 def _safe_inv_cov_2x2(
-    cov_uv: torch.Tensor,
+    cov00: torch.Tensor,
+    cov01: torch.Tensor,
+    cov11: torch.Tensor,
     eig_floor: float = 1e-4,
-) -> torch.Tensor:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Fast eigenvalue-clamped inverse for symmetric 2x2 covariance matrices.
+    Fast eigenvalue-clamped inverse for symmetric 2x2 covariance matrices,
+    operating on the three independent scalar components directly.
 
     Mathematically equivalent to:
-        eigvals, eigvecs = torch.linalg.eigh(cov_uv)
+        eigvals, eigvecs = torch.linalg.eigh([[cov00, cov01], [cov01, cov11]])
         eigvals = clamp(eigvals, min=eig_floor)
         inv = eigvecs @ diag(1/eigvals) @ eigvecs.T
 
-    but avoids torch.linalg.eigh.
+    but avoids torch.linalg.eigh and matrix wrap/unwrap.
     """
-    cov_uv = _symmetrize(cov_uv)
-
-    a = cov_uv[:, 0, 0]
-    b = cov_uv[:, 0, 1]
-    c = cov_uv[:, 1, 1]
-
-    trace_half = 0.5 * (a + c)
-    diff_half = 0.5 * (a - c)
-    radius = torch.sqrt(torch.clamp(diff_half * diff_half + b * b, min=0.0))
+    trace_half = 0.5 * (cov00 + cov11)
+    diff_half = 0.5 * (cov00 - cov11)
+    radius = torch.sqrt(torch.clamp(diff_half * diff_half + cov01 * cov01, min=0.0))
 
     lam_hi = trace_half + radius
     lam_lo = trace_half - radius
@@ -142,25 +136,17 @@ def _safe_inv_cov_2x2(
     )
 
     inv00 = alpha + beta * diff_half
-    inv01 = beta * b
+    inv01 = beta * cov01
     inv11 = alpha - beta * diff_half
 
-    inv_cov_uv = torch.stack(
-        [
-            torch.stack([inv00, inv01], dim=-1),
-            torch.stack([inv01, inv11], dim=-1),
-        ],
-        dim=-2,
-    )
-
-    return inv_cov_uv
+    return inv00, inv01, inv11
 
 def _projected_angular_covariance(
     means: torch.Tensor,
     covariances: torch.Tensor,
     array_pos: torch.Tensor,
     covariance_floor: float = 1e-6,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Fast covariance-aware projection from 3D Gaussian to uv domain.
 
@@ -226,32 +212,26 @@ def _projected_angular_covariance(
     cov01 = biform(jy0, jy1, jy2, jz0, jz1, jz2)
     cov11 = qform(jz0, jz1, jz2) + covariance_floor
 
-    cov_uv = torch.stack(
-        [
-            torch.stack([cov00, cov01], dim=-1),
-            torch.stack([cov01, cov11], dim=-1),
-        ],
-        dim=-2,
-    )
-
-    return uv_mean, cov_uv, dist
+    return uv_mean, cov00, cov01, cov11, dist
 
 def _gaussian_beam_weights_from_uv(
     uv_mean: torch.Tensor,
-    cov_uv: torch.Tensor,
+    cov00: torch.Tensor,
+    cov01: torch.Tensor,
+    cov11: torch.Tensor,
     beam_centers_uv: torch.Tensor,
     normalize: bool = True,
     weight_floor: float = 0.0,
     eig_floor: float = 1e-4,
 ) -> torch.Tensor:
-    inv_cov_uv = _safe_inv_cov_2x2(cov_uv, eig_floor=eig_floor)
+    inv00, inv01, inv11 = _safe_inv_cov_2x2(cov00, cov01, cov11, eig_floor=eig_floor)
 
     dx = beam_centers_uv[:, 0].unsqueeze(0) - uv_mean[:, 0].unsqueeze(1)
     dy = beam_centers_uv[:, 1].unsqueeze(0) - uv_mean[:, 1].unsqueeze(1)
 
-    inv00 = inv_cov_uv[:, 0, 0].unsqueeze(1)
-    inv01 = inv_cov_uv[:, 0, 1].unsqueeze(1)
-    inv11 = inv_cov_uv[:, 1, 1].unsqueeze(1)
+    inv00 = inv00.unsqueeze(1)
+    inv01 = inv01.unsqueeze(1)
+    inv11 = inv11.unsqueeze(1)
 
     mahal = inv00 * dx * dx + 2.0 * inv01 * dx * dy + inv11 * dy * dy
 
@@ -382,7 +362,7 @@ def render(
     # ------------------------------------------------------------------
     # Covariance-aware soft projection to Rx beam-domain
     # ------------------------------------------------------------------
-    rx_uv_mean, rx_cov_uv, _ = _projected_angular_covariance(
+    rx_uv_mean, rx_cov00, rx_cov01, rx_cov11, _ = _projected_angular_covariance(
         means=means,
         covariances=covariances,
         array_pos=rx_pos,
@@ -395,7 +375,9 @@ def render(
 
     rx_weights = _gaussian_beam_weights_from_uv(
     uv_mean=rx_uv_mean,
-    cov_uv=rx_cov_uv,
+    cov00=rx_cov00,
+    cov01=rx_cov01,
+    cov11=rx_cov11,
     beam_centers_uv=rx_beam_centers_uv,
     normalize=normalize_beam_weights,
     weight_floor=weight_floor,
@@ -410,7 +392,7 @@ def render(
     # ------------------------------------------------------------------
     # Covariance-aware soft projection to Tx beam-domain
     # ------------------------------------------------------------------
-    tx_uv_mean, tx_cov_uv, _ = _projected_angular_covariance(
+    tx_uv_mean, tx_cov00, tx_cov01, tx_cov11, _ = _projected_angular_covariance(
         means=means,
         covariances=covariances,
         array_pos = tx_pos,
@@ -418,7 +400,9 @@ def render(
     )
     tx_weights = _gaussian_beam_weights_from_uv(
         uv_mean=tx_uv_mean,
-        cov_uv=tx_cov_uv,
+        cov00=tx_cov00,
+        cov01=tx_cov01,
+        cov11=tx_cov11,
         beam_centers_uv=tx_beam_centers_uv,
         normalize=normalize_beam_weights,
         weight_floor=weight_floor,
