@@ -44,24 +44,24 @@ def clone_gaussian_state(gaussian_state):
 
 def strip_optimizer_state(gaussian_state):
     state = list(gaussian_state)
-    # capture() layout in GaussianModel:
-    # 0 target_gaussians
-    # 1 optimizer_type
-    # 2 init_range
-    # 3 xyz
-    # 4 scaling
-    # 5 rotation
-    # 6 opacity
-    # 7 gain_mag
-    # 8 xyz_gradient_accum
-    # 9 grad_denom
-    # 10 importance_accum
-    # 11 importance_denom
-    # 12 optimizer_state_dict
-    # 13 dynamic_gain_net_state_dict
-    # 14 dynamic_gain_optimizer_state_dict
-    state[12] = None
-    state[14] = None
+    # capture() layout in GaussianModel (current):
+    # 0  target_gaussians
+    # 1  optimizer_type
+    # 2  init_range
+    # 3  _xyz
+    # 4  _scaling
+    # 5  _rotation
+    # 6  _opacity
+    # 7  xyz_gradient_accum
+    # 8  grad_denom
+    # 9  importance_accum
+    # 10 importance_denom
+    # 11 optimizer_state_dict             <- Gaussian optimizer state
+    # 12 dynamic_gain_net_state_dict
+    # 13 dynamic_gain_optimizer_state_dict <- dynamic-gain optimizer state
+    # 14 _xyz_tx                           (appended; absent in pre-Tx-anchor checkpoints)
+    state[11] = None
+    state[13] = None
     return tuple(state)
 
 

@@ -125,6 +125,7 @@ class GaussianModel:
         self.init_range = init_range
 
         self._xyz = torch.empty(0, device = self.device)
+        self._xyz_tx = torch.empty(0, device = self.device)
         self._scaling = torch.empty(0, device = self.device)
         self._rotation = torch.empty(0, device = self.device)
         self._opacity = torch.empty(0, device = self.device)
@@ -162,6 +163,10 @@ class GaussianModel:
     @property
     def get_xyz(self):
         return self._xyz
+
+    @property
+    def get_xyz_tx(self):
+        return self._xyz_tx
 
     @property
     def get_scaling(self):
@@ -256,6 +261,7 @@ class GaussianModel:
         # )
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
+        self._xyz_tx = nn.Parameter(fused_point_cloud.clone().requires_grad_(True))
         self._scaling = nn.Parameter(scales_raw.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities_raw.requires_grad_(True))
@@ -282,9 +288,13 @@ class GaussianModel:
 
             self.dynamic_gain_net.state_dict(),
             None if self.dynamic_gain_optimizer is None else self.dynamic_gain_optimizer.state_dict(),
+            # Appended at the end so legacy positional consumers (indices 0-2, 11, 13)
+            # keep working. Old checkpoints without this entry restore via fallback below.
+            self._xyz_tx.detach(),
         )
 
     def restore(self, model_args, training_args):
+        model_args = tuple(model_args)
         (
             self.target_gaussians,
             self.optimizer_type,
@@ -302,13 +312,21 @@ class GaussianModel:
 
             dynamic_gain_net_dict,
             dynamic_gain_opt_dict,
-        ) = model_args
+        ) = model_args[:14]
+
+        # Backward-compat: pre-Tx-anchor checkpoints have len(model_args)==14.
+        xyz_tx = model_args[14] if len(model_args) >= 15 and model_args[14] is not None else None
 
         self._xyz = nn.Parameter(xyz.to(self.device).requires_grad_(True))
         self._scaling = nn.Parameter(scaling.to(self.device).requires_grad_(True))
         self._rotation = nn.Parameter(rotation.to(self.device).requires_grad_(True))
         self._opacity = nn.Parameter(opacity.to(self.device).requires_grad_(True))
         # self._gain_mag = nn.Parameter(gain_mag.to(self.device).requires_grad_(True))
+
+        if xyz_tx is not None:
+            self._xyz_tx = nn.Parameter(xyz_tx.to(self.device).requires_grad_(True))
+        else:
+            self._xyz_tx = nn.Parameter(self._xyz.detach().clone().requires_grad_(True))
 
         self.training_setup(training_args)
 
@@ -341,6 +359,7 @@ class GaussianModel:
         
         param_groups = [
             {"params": [self._xyz], "lr": training_args.position_lr_init, "name": "xyz"},
+            {"params": [self._xyz_tx], "lr": training_args.position_lr_init, "name": "xyz_tx"},
             {"params": [self._opacity], "lr": training_args.opacity_lr, "name": "opacity"},
             {"params": [self._scaling], "lr": training_args.scaling_lr, "name": "scaling"},
             {"params": [self._rotation], "lr": training_args.rotation_lr, "name": "rotation"},
@@ -389,6 +408,9 @@ class GaussianModel:
     def update_learning_rate(self, iteration):
         for param_group in self.optimizer.param_groups:
             if param_group["name"] == "xyz":
+                lr = self.xyz_scheduler_args(iteration)
+                param_group["lr"] = lr
+            elif param_group["name"] == "xyz_tx":
                 lr = self.xyz_scheduler_args(iteration)
                 param_group["lr"] = lr
             elif param_group["name"] == "opacity":
@@ -518,6 +540,8 @@ class GaussianModel:
         # gain_mag_t = torch.tensor(gain_mag, dtype=torch.float32, device=self.device)
 
         self._xyz = nn.Parameter(xyz_t.requires_grad_(True))
+        # PLY format carries only the rx anchor; tie the tx anchor to it on reload.
+        self._xyz_tx = nn.Parameter(xyz_t.clone().requires_grad_(True))
         self._opacity = nn.Parameter(
             self.inverse_opacity_activation(opacity_t).requires_grad_(True)
         )
@@ -615,6 +639,7 @@ class GaussianModel:
         optimizable_tensors = self._prune_optimizer(valid_points_mask)
 
         self._xyz = optimizable_tensors["xyz"]
+        self._xyz_tx = optimizable_tensors["xyz_tx"]
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
@@ -631,10 +656,12 @@ class GaussianModel:
         new_opacity: torch.Tensor,
         new_scaling: torch.Tensor,
         new_rotation: torch.Tensor,
+        new_xyz_tx: torch.Tensor,
         # new_gain_mag: torch.Tensor,
     ):
         tensors_dict = {
             "xyz": new_xyz,
+            "xyz_tx": new_xyz_tx,
             "opacity": new_opacity,
             "scaling": new_scaling,
             "rotation": new_rotation,
@@ -644,6 +671,7 @@ class GaussianModel:
         optimizable_tensors = self.cat_tensors_to_optimizer(tensors_dict)
 
         self._xyz = optimizable_tensors["xyz"]
+        self._xyz_tx = optimizable_tensors["xyz_tx"]
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
@@ -674,6 +702,7 @@ class GaussianModel:
             return
 
         new_xyz = self._xyz[selected_pts_mask].clone()
+        new_xyz_tx = self._xyz_tx[selected_pts_mask].clone()
         new_opacity = self._opacity[selected_pts_mask].clone()
         new_scaling = self._scaling[selected_pts_mask].clone()
         new_rotation = self._rotation[selected_pts_mask].clone()
@@ -681,7 +710,7 @@ class GaussianModel:
 
 
         self.densification_postfix(
-            new_xyz, new_opacity, new_scaling, new_rotation
+            new_xyz, new_opacity, new_scaling, new_rotation, new_xyz_tx
         )
 
     def densify_and_split(
@@ -716,7 +745,12 @@ class GaussianModel:
         rot_mats = build_rotation(rots)
 
         base_xyz = self.get_xyz[selected_pts_mask].repeat(n_splits, 1)
-        new_xyz = torch.bmm(rot_mats, samples.unsqueeze(-1)).squeeze(-1) + base_xyz
+        offsets = torch.bmm(rot_mats, samples.unsqueeze(-1)).squeeze(-1)
+        new_xyz = offsets + base_xyz
+        # Mirror the per-child offset on the Tx anchor so the (rx, tx) pair-relationship
+        # learned so far is preserved by each child.
+        base_xyz_tx = self._xyz_tx[selected_pts_mask].repeat(n_splits, 1)
+        new_xyz_tx = offsets + base_xyz_tx
 
         new_scaling = self.scaling_inverse_activation(
             torch.clamp(
@@ -729,7 +763,7 @@ class GaussianModel:
         # new_gain_mag = self._gain_mag[selected_pts_mask].repeat(n_splits, 1)
 
         self.densification_postfix(
-            new_xyz, new_opacity, new_scaling, new_rotation
+            new_xyz, new_opacity, new_scaling, new_rotation, new_xyz_tx
         )
 
         prune_filter = torch.cat(

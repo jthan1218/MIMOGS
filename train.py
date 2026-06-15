@@ -325,6 +325,11 @@ def training(model_params, opt_params, raw_args):
                 return_terms=True,
             )
 
+            # Anchor-tie regularizer: pulls per-Gaussian Tx anchor toward Rx anchor.
+            lambda_anchor = float(getattr(opt_params, "lambda_anchor", 1))
+            anchor_reg = ((gaussians._xyz - gaussians._xyz_tx) ** 2).sum(dim=-1).mean()
+            loss = loss + lambda_anchor * anchor_reg
+
             gaussians.optimizer.zero_grad(set_to_none=True)
             gaussians.dynamic_gain_optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -355,13 +360,21 @@ def training(model_params, opt_params, raw_args):
                         dyn_grad_norm += p.grad.norm().item()
 
                 with torch.no_grad():
+                    xyz_tx_grad = (
+                        gaussians._xyz_tx.grad.norm().item()
+                        if gaussians._xyz_tx.grad is not None
+                        else 0.0
+                    )
+                    anchor_sep = (gaussians._xyz - gaussians._xyz_tx).norm(dim=-1).mean().item()
                     print(
                         f"grad xyz={gaussians._xyz.grad.norm().item():.3e}, "
+                        f"xyz_tx={xyz_tx_grad:.3e}, "
                         f"opacity={gaussians._opacity.grad.norm().item():.3e}, "
                         f"scaling={gaussians._scaling.grad.norm().item():.3e}, "
                         f"rotation={gaussians._rotation.grad.norm().item():.3e}, "
                         # f"gain_mag={gaussians._gain_mag.grad.norm().item():.3e}, "
-                        f"dyn_gain={dyn_grad_norm:.3e}"
+                        f"dyn_gain={dyn_grad_norm:.3e}, "
+                        f"mean||xyz-xyz_tx||={anchor_sep:.3e}"
                     )
 
             if iteration > 0 and iteration % 1000 == 0:

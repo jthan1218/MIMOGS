@@ -391,9 +391,21 @@ def render(
 
     # ------------------------------------------------------------------
     # Covariance-aware soft projection to Tx beam-domain
+    #
+    # The transmit side uses an independent 3D anchor (pc.get_xyz_tx) so the
+    # tx-beam direction can be set by a different interaction point than the
+    # rx-beam direction. This is what gives the model the degrees of freedom
+    # to represent multi-bounce paths. When _xyz_tx == _xyz (tied init or
+    # strong anchor regularization), behaviour collapses back to the original
+    # single-anchor render.
+    #
+    # TODO(multi-bounce): plug in a separate `pc.get_covariance_tx()` here once
+    # decoupled covariance is implemented. For now both projections share the
+    # same per-Gaussian covariance.
     # ------------------------------------------------------------------
+    means_tx = pc.get_xyz_tx
     tx_uv_mean, tx_cov00, tx_cov01, tx_cov11, _ = _projected_angular_covariance(
-        means=means,
+        means=means_tx,
         covariances=covariances,
         array_pos = tx_pos,
         covariance_floor = covariance_floor,

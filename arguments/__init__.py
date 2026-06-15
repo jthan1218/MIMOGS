@@ -101,6 +101,13 @@ class OptimizationParams(ParamGroup):
         self.dynamic_gain_lr = 0.001
         self.dynamic_gain_lr_final = 0.0001
 
+        # Anchor-tie regularizer weight: pulls the per-Gaussian Tx anchor
+        # (_xyz_tx) toward the Rx anchor (_xyz). With a large default the
+        # model behaves as a single-anchor (LoS / single-bounce) renderer;
+        # the optimizer is free to separate the two anchors where the data
+        # demands it (multi-bounce paths).
+        self.lambda_anchor = 1
+
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser: ArgumentParser):
