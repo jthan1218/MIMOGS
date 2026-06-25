@@ -71,7 +71,9 @@ class DynamicGainNet(nn.Module):
         )
         
         pe_dim = self.pe.out_dim
-        mlp_in_dim = pe_dim * 3 + 1
+        # no-log-distance ablation: log-distance feature removed, so the MLP
+        # input is [PE(xyz), PE(rx), PE(rel)] with no scalar log-distance.
+        mlp_in_dim = pe_dim * 3
 
         self.net = nn.Sequential(
             nn.Linear(mlp_in_dim, hidden_dim),
@@ -86,18 +88,16 @@ class DynamicGainNet(nn.Module):
         nn.init.constant_(self.net[-1].bias, init_bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x shape: (N, 10)
+        # x shape: (N, 9)
         xyz = x[:, 0:3]
         rx  = x[:, 3:6]
         rel = x[:, 6:9]
-        logd = x[:, 9:10]
 
         feat = torch.cat(
             [
                 self.pe(xyz),
                 self.pe(rx),
                 self.pe(rel),
-                logd,
             ],
             dim=-1,
         )
@@ -431,19 +431,19 @@ class GaussianModel:
             alpha_n * s_n(r), shape (N,1)
         where
             alpha_n = opacity_n
-            s_n(r)  = softplus(MLP([xyz, rx, xyz-rx, log1p(dist)]))
+            s_n(r)  = softplus(MLP([xyz, rx, xyz-rx]))
+        no-log-distance ablation: the scalar log-distance feature is removed.
         """
         rx = rx_pos.view(1, 3).to(self.device, dtype=self.get_xyz.dtype)
 
         xyz = self.get_xyz                      # (N,3)
         rel = xyz - rx                         # (N,3)
-        dist = torch.norm(rel, dim=-1, keepdim=True).clamp(min=1e-6)
         rx_rep = rx.expand(xyz.shape[0], -1)   # (N,3)
 
         feat = torch.cat(
-            [xyz, rx_rep, rel, torch.log1p(dist)],
+            [xyz, rx_rep, rel],
             dim=-1
-        )                                      # (N,10)
+        )                                      # (N,9)
 
         dynamic_gain = F.softplus(self.dynamic_gain_net(feat))  # (N,1)
         gain_weight = self.get_opacity * dynamic_gain
