@@ -39,23 +39,14 @@ def prepare_output_dir(model_path: str) -> None:
     os.makedirs(os.path.join(model_path, "pred_compare"), exist_ok=True)
 
 
-def save_args(
-    path: str,
-    model_params,
-    opt_params,
-    raw_args,
-) -> None:
+def save_args(path: str,model_params,opt_params,raw_args) -> None:
     """Save all command-line and model parameters."""
     os.makedirs(path, exist_ok=True)
 
     args_path = os.path.join(path, "run_args.txt")
 
     with open(args_path, "w", encoding="utf-8") as file:
-        for title, obj in (
-            ("Model Params", model_params),
-            ("Optimization Params", opt_params),
-            ("Raw Args", raw_args),
-        ):
+        for title, obj in [("Model Params", model_params),("Optimization Params", opt_params),("Raw Args", raw_args)]:
             file.write(f"[{title}]\n")
 
             for key, value in sorted(vars(obj).items()):
@@ -71,10 +62,7 @@ def evaluate_and_save_random_test_samples(
 ) -> None:
     """Render and save comparison figures for random test samples."""
 
-    save_dir = os.path.join(
-        model_params.model_path,
-        "pred_compare",
-    )
+    save_dir = os.path.join(model_params.model_path,"pred_compare")
     os.makedirs(save_dir, exist_ok=True)
 
     total_test_samples = len(scene.test_set)
@@ -83,70 +71,27 @@ def evaluate_and_save_random_test_samples(
         print("[Evaluation] Test set is empty. Skipping figure generation.")
         return
 
-    num_samples = min(
-        NUM_EVAL_SAMPLES,
-        total_test_samples,
-    )
-    eval_batch_size = min(
-        max(1, int(EVAL_BATCH_SIZE)),
-        num_samples,
-    )
+    num_samples = min(NUM_EVAL_SAMPLES,total_test_samples)
+    eval_batch_size = min(max(1, int(EVAL_BATCH_SIZE)),num_samples)
 
     # Fixed seed ensures that the same test samples are selected every run.
     random_generator = random.Random(12345)
-    selected_indices = random_generator.sample(
-        range(total_test_samples),
-        num_samples,
-    )
+    selected_indices = random_generator.sample(range(total_test_samples),num_samples)
 
     # Load the selected samples on CPU first, then transfer each stacked
     # tensor to the model device only once.
-    selected_samples = [
-        scene.test_set[test_index]
-        for test_index in selected_indices
-    ]
-
-    ground_truth_batch_cpu = torch.stack(
-        [
-            magnitude.reshape(
-                scene.beam_rows,
-                scene.beam_cols,
-            )
-            for magnitude, _ in selected_samples
-        ],
-        dim=0,
-    )
-
-    rx_pos_batch_cpu = torch.stack(
-        [
-            rx_pos.reshape(3)
-            for _, rx_pos in selected_samples
-        ],
-        dim=0,
-    )
+    selected_samples = [scene.test_set[test_index] for test_index in selected_indices]
+    ground_truth_batch_cpu = torch.stack([magnitude.reshape(scene.beam_rows,scene.beam_cols) for magnitude, _ in selected_samples],dim=0)
+    rx_pos_batch_cpu = torch.stack([rx_pos.reshape(3) for _, rx_pos in selected_samples],dim=0)
 
     device = gaussians.get_xyz.device
 
-    ground_truth_batch = ground_truth_batch_cpu.to(
-        device,
-        non_blocking=True,
-    )
+    ground_truth_batch = ground_truth_batch_cpu.to(device,non_blocking=True)
 
-    rx_pos_batch = rx_pos_batch_cpu.to(
-        device,
-        non_blocking=True,
-    )
+    rx_pos_batch = rx_pos_batch_cpu.to(device,non_blocking=True)
+    tx_pos = torch.as_tensor(scene.bs_position,dtype=torch.float32,device=device)
 
-    tx_pos = torch.as_tensor(
-        scene.bs_position,
-        dtype=torch.float32,
-        device=device,
-    )
-
-    print(
-        f"[Evaluation] Rendering {num_samples} random test samples "
-        f"with eval batch size {eval_batch_size}..."
-    )
+    print(f"[Evaluation] Rendering {num_samples} random test samples with eval batch size {eval_batch_size}...")
 
     gaussians.dynamic_gain_net.eval()
 
@@ -159,15 +104,8 @@ def evaluate_and_save_random_test_samples(
         render_start = time.perf_counter()
         predicted_chunks = []
 
-        for start_index in range(
-            0,
-            num_samples,
-            eval_batch_size,
-        ):
-            end_index = min(
-                start_index + eval_batch_size,
-                num_samples,
-            )
+        for start_index in range(0,num_samples,eval_batch_size):
+            end_index = min(start_index + eval_batch_size,num_samples)
 
             rendered_output = render_fast(
                 rx_pos=rx_pos_batch[start_index:end_index],
@@ -177,15 +115,9 @@ def evaluate_and_save_random_test_samples(
                 tx_shape=(4, 4),
                 covariance_floor=1e-4,
                 weight_floor=1e-4,
-                max_active_rx_beams=int(
-                    getattr(model_params, "max_active_rx_beams", 2)
-                ),
-                max_active_tx_beams=int(
-                    getattr(model_params, "max_active_tx_beams", 2)
-                ),
-                use_cuda_rasterizer=bool(
-                    int(getattr(model_params, "use_cuda_rasterizer", 1))
-                ),
+                max_active_rx_beams=int(getattr(model_params, "max_active_rx_beams", 2)),
+                max_active_tx_beams=int(getattr(model_params, "max_active_tx_beams", 2)),
+                use_cuda_rasterizer=bool(int(getattr(model_params, "use_cuda_rasterizer", 1))),
             )
 
             predicted_chunk = rendered_output["render"]
@@ -202,47 +134,23 @@ def evaluate_and_save_random_test_samples(
         render_time = time.perf_counter() - render_start
 
         # All rendering is complete before any result is transferred to CPU.
-        predicted_batch = torch.cat(
-            predicted_chunks,
-            dim=0,
-        )
+        predicted_batch = torch.cat(predicted_chunks,dim=0)
 
         if predicted_batch.shape[0] != num_samples:
-            raise RuntimeError(
-                "The number of rendered predictions does not match "
-                f"the requested sample count: "
-                f"{predicted_batch.shape[0]} != {num_samples}"
-            )
+            raise RuntimeError(f"The number of rendered predictions does not match the requested sample count: {predicted_batch.shape[0]} != {num_samples}")
 
-        ground_truth_normalized = normalize_mag_map(
-            ground_truth_batch
-        )
+        ground_truth_normalized = normalize_mag_map(ground_truth_batch)
 
         # Exclude concatenation and normalization from transfer timing.
         if device.type == "cuda":
             torch.cuda.synchronize(device)
 
-        # device_to_cpu_start = time.perf_counter()
+        predicted_batch_cpu = predicted_batch.detach().cpu()
 
-        predicted_batch_cpu = (
-            predicted_batch
-            .detach()
-            .cpu()
-        )
-
-        ground_truth_batch_cpu = (
-            ground_truth_normalized
-            .detach()
-            .cpu()
-        )
+        ground_truth_batch_cpu = ground_truth_normalized.detach().cpu()
 
         if device.type == "cuda":
             torch.cuda.synchronize(device)
-
-        # device_to_cpu_time = (
-        #     time.perf_counter()
-        #     - device_to_cpu_start
-        # )
 
     # NumPy conversion happens after the measured GPU-to-CPU transfer.
     predicted_numpy = predicted_batch_cpu.numpy()
@@ -262,45 +170,20 @@ def evaluate_and_save_random_test_samples(
         )
 
         # Ground-truth map
-        ground_truth_image = axes[0].imshow(
-            ground_truth_map_numpy,
-            aspect="equal",
-            interpolation="nearest",
-        )
-
+        ground_truth_image = axes[0].imshow(ground_truth_map_numpy,aspect="equal",interpolation="nearest")
         axes[0].set_title("Ground Truth")
         axes[0].set_xlabel("")
         axes[0].set_ylabel("")
         axes[0].set_aspect("equal")
 
-        ground_truth_divider = make_axes_locatable(
-            axes[0]
-        )
-
-        ground_truth_colorbar_axis = (
-            ground_truth_divider.append_axes(
-                "right",
-                size="3.5%",
-                pad=0.08,
-            )
-        )
-
-        ground_truth_colorbar = figure.colorbar(
-            ground_truth_image,
-            cax=ground_truth_colorbar_axis,
-        )
-
-        ground_truth_colorbar.ax.yaxis.set_major_formatter(
-            FormatStrFormatter("%.1f")
-        )
+        ground_truth_divider = make_axes_locatable(axes[0])
+        ground_truth_colorbar_axis = ground_truth_divider.append_axes("right",size="3.5%",pad=0.08)
+        ground_truth_colorbar = figure.colorbar(ground_truth_image,cax=ground_truth_colorbar_axis)
+        ground_truth_colorbar.ax.yaxis.set_major_formatter(FormatStrFormatter("%.1f"))
         ground_truth_colorbar.update_ticks()
 
         # Predicted map
-        predicted_image = axes[1].imshow(
-            predicted_map_numpy,
-            aspect="equal",
-            interpolation="nearest",
-        )
+        predicted_image = axes[1].imshow(predicted_map_numpy,aspect="equal",interpolation="nearest")
 
         axes[1].set_title("Predicted")
         axes[1].set_xlabel("")
@@ -311,9 +194,7 @@ def evaluate_and_save_random_test_samples(
 
         predicted_colorbar_axis = predicted_divider.append_axes("right",size="3.5%",pad=0.08)
         predicted_colorbar = figure.colorbar(predicted_image,cax=predicted_colorbar_axis)
-        predicted_colorbar.ax.yaxis.set_major_formatter(
-            FormatStrFormatter("%.1f")
-        )
+        predicted_colorbar.ax.yaxis.set_major_formatter(FormatStrFormatter("%.1f"))
         predicted_colorbar.update_ticks()
 
         figure_path = os.path.join(save_dir,f"{output_index:02d}.png")
@@ -352,11 +233,7 @@ def training(
 ) -> None:
     """Run batched MIMO-GS training."""
 
-    device = torch.device(
-        model_params.data_device
-        if torch.cuda.is_available()
-        else "cpu"
-    )
+    device = torch.device(model_params.data_device if torch.cuda.is_available() else "cpu")
 
     if not getattr(model_params, "model_path", None):
         model_params.model_path = make_output_path()
@@ -365,20 +242,11 @@ def training(
 
     save_args(model_params.model_path,model_params,opt_params,raw_args)
 
-    gaussians = GaussianModel(
-        target_gaussians=int(getattr(model_params, "target_gaussians", 25_000)),
-        optimizer_type=opt_params.optimizer_type,
-        device=str(device),
-        init_range=1.0,
-    )
+    gaussians = GaussianModel(target_gaussians=int(getattr(model_params, "target_gaussians", 25_000)),optimizer_type=opt_params.optimizer_type,device=str(device),init_range=1.0)
 
     scene = Scene(model_params,gaussians)
 
-    if (
-        getattr(model_params, "init_mode", "random")
-        == "vertices"
-        and getattr(model_params, "vertices_path", "")
-    ):
+    if getattr(model_params, "init_mode", "random") == "vertices" and getattr(model_params, "vertices_path", ""):
         vertices_path = model_params.vertices_path
     else:
         vertices_path = None
@@ -404,10 +272,7 @@ def training(
     iteration = 0
     ema_loss = 0.0
 
-    progress_bar = tqdm(
-        total=total_iterations,
-        desc="MIMO-GS training",
-    )
+    progress_bar = tqdm(total=total_iterations,desc="MIMO-GS training")
 
     gaussians.dynamic_gain_net.train()
 
@@ -416,15 +281,10 @@ def training(
             iteration += 1
 
             gaussians.update_learning_rate(iteration)
-
             magnitude = magnitude.to(device,non_blocking=True)
-
             rx_pos = rx_pos.to(device,non_blocking=True)
-
             ground_truth_map = magnitude.reshape(magnitude.shape[0],scene.beam_rows,scene.beam_cols)
-
             gaussians.optimizer.zero_grad(set_to_none=True)
-
             gaussians.dynamic_gain_optimizer.zero_grad(set_to_none=True)
 
             with torch.cuda.amp.autocast(
