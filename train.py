@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import random
 import time
@@ -17,7 +18,7 @@ from arguments import ModelParams, OptimizationParams, get_combined_args
 from gaussian_renderer.fast_renderer import render_fast
 from scene import GaussianModel, Scene
 from utils.general_utils import safe_state
-from utils.loss import hybrid_magnitude_loss, normalize_mag_map
+from utils.loss import composite_magnitude_loss, normalize_mag_map
 
 
 # Post-training evaluation settings.
@@ -210,6 +211,87 @@ def evaluate_and_save_random_test_samples(
     print(f"[Evaluation][Timing] render: {render_time:.4f} s")
     print(f"[Evaluation][Timing] plot_and_save: {plot_and_save_time:.4f} s")
 
+
+def evaluate_full_test_quality(
+    scene: Scene,
+    gaussians: GaussianModel,
+    model_params,
+) -> None:
+    """Render the entire test set in batches and print scale/shape NMSE.
+
+    scale NMSE compares the raw prediction with the max-normalized ground
+    truth; shape NMSE compares the max-normalized prediction with the
+    max-normalized ground truth. Per-sample linear NMSE values are averaged
+    over the full test set first and the mean is converted to dB once.
+    No figures are saved here.
+    """
+
+    total_test_samples = len(scene.test_set)
+
+    if total_test_samples == 0:
+        print("[Evaluation][Quality] Test set is empty. Skipping quality evaluation.")
+        return
+
+    device = gaussians.get_xyz.device
+    tx_pos = torch.as_tensor(scene.bs_position,dtype=torch.float32,device=device)
+
+    gaussians.dynamic_gain_net.eval()
+
+    scale_nmse_sum = 0.0
+    shape_nmse_sum = 0.0
+    evaluated_samples = 0
+
+    with torch.inference_mode():
+        for magnitude, rx_pos in scene.test_iter:
+            magnitude = magnitude.to(device,non_blocking=True)
+            rx_pos = rx_pos.to(device,non_blocking=True)
+
+            ground_truth_map = magnitude.reshape(magnitude.shape[0],scene.beam_rows,scene.beam_cols)
+
+            rendered_output = render_fast(
+                rx_pos=rx_pos.reshape(-1, 3),
+                tx_pos=tx_pos,
+                pc=gaussians,
+                rx_shape=(2, 2),
+                tx_shape=(4, 4),
+                covariance_floor=1e-4,
+                weight_floor=1e-4,
+                max_active_rx_beams=int(getattr(model_params, "max_active_rx_beams", 2)),
+                max_active_tx_beams=int(getattr(model_params, "max_active_tx_beams", 2)),
+                use_cuda_rasterizer=bool(int(getattr(model_params, "use_cuda_rasterizer", 1))),
+            )
+
+            predicted_map = rendered_output["render"]
+
+            if predicted_map.ndim == 2:
+                predicted_map = predicted_map.unsqueeze(0)
+
+            ground_truth_normalized = normalize_mag_map(ground_truth_map)
+            predicted_normalized = normalize_mag_map(predicted_map)
+
+            target_flat = ground_truth_normalized.reshape(ground_truth_normalized.shape[0],-1)
+            raw_predicted_flat = predicted_map.reshape(predicted_map.shape[0],-1)
+            normalized_predicted_flat = predicted_normalized.reshape(predicted_normalized.shape[0],-1)
+
+            target_energy = target_flat.square().sum(dim=1).clamp_min(1e-8)
+            scale_nmse = (raw_predicted_flat - target_flat).square().sum(dim=1) / target_energy
+            shape_nmse = (normalized_predicted_flat - target_flat).square().sum(dim=1) / target_energy
+
+            scale_nmse_sum += float(scale_nmse.sum().item())
+            shape_nmse_sum += float(shape_nmse.sum().item())
+            evaluated_samples += int(target_flat.shape[0])
+
+    gaussians.dynamic_gain_net.train()
+
+    mean_scale_nmse = scale_nmse_sum / evaluated_samples
+    mean_shape_nmse = shape_nmse_sum / evaluated_samples
+
+    scale_nmse_db = 10.0 * math.log10(max(mean_scale_nmse, 1e-12))
+    shape_nmse_db = 10.0 * math.log10(max(mean_shape_nmse, 1e-12))
+
+    print(f"[Evaluation][Quality] N={evaluated_samples} | scale NMSE: {scale_nmse_db:.2f} dB | shape NMSE: {shape_nmse_db:.2f} dB")
+
+
 def get_avg_opacity(gaussians) -> float:
     with torch.no_grad():
         if hasattr(gaussians, "get_opacity"):
@@ -313,7 +395,7 @@ def training(
 
                 predicted_map = rendered_output["render"]
 
-                reconstruction_loss,normalized_mse_term,topk_term = hybrid_magnitude_loss(
+                reconstruction_loss,scale_term,shape_term,topk_term = composite_magnitude_loss(
                     predicted_map,
                     ground_truth_map,
                     topk_ratio=0.0625,
@@ -395,6 +477,9 @@ def training(
 
     # Save random test rendering results using the fixed settings above.
     evaluate_and_save_random_test_samples(scene,gaussians,model_params)
+
+    # Full-test-set quality metrics (printed only; no extra images).
+    evaluate_full_test_quality(scene,gaussians,model_params)
 
     print("[Train] Done.")
 

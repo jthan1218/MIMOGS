@@ -12,8 +12,36 @@ namespace {
 constexpr int kThreads = 256;
 constexpr int kMaxTopK = 8;
 
-__device__ __forceinline__ float clamp_logit(float x) {
-  return fminf(0.0f, fmaxf(-80.0f, x));
+// Stable softmax over the k selected raw logits stored in `values`.  The
+// maximum selected logit is shifted to zero, so the strongest beam always
+// keeps weight exp(0)=1 and the normalized weights sum to one; the optional
+// floor therefore acts on weights relative to the strongest selected beam and
+// can never zero out an entire row.
+__device__ __forceinline__ void normalize_topk_weights(
+    float* values, int k, float weight_floor) {
+  float max_logit = values[0];
+#pragma unroll
+  for (int i = 1; i < kMaxTopK; ++i) {
+    if (i >= k) break;
+    max_logit = fmaxf(max_logit, values[i]);
+  }
+
+  float denom = 0.0f;
+#pragma unroll
+  for (int i = 0; i < kMaxTopK; ++i) {
+    if (i >= k) break;
+    float w = expf(values[i] - max_logit);
+    if (weight_floor > 0.0f && w < weight_floor) w = 0.0f;
+    values[i] = w;
+    denom += w;
+  }
+  denom = fmaxf(denom, 1.0e-12f);
+
+#pragma unroll
+  for (int i = 0; i < kMaxTopK; ++i) {
+    if (i >= k) break;
+    values[i] /= denom;
+  }
 }
 
 __device__ __forceinline__ void insert_topk(
@@ -61,29 +89,22 @@ __global__ void topk_tx_kernel(
   const float p01 = precision[3 * n + 1];
   const float p11 = precision[3 * n + 2];
 
+  // Selection uses the raw logits so the beam ordering is never destroyed by
+  // clamping; normalization afterwards is a stable softmax over the winners.
   for (int b = 0; b < n_beams; ++b) {
     const float dx = centers[2 * b + 0] - ux;
     const float dy = centers[2 * b + 1] - uy;
     const float mahal = p00 * dx * dx + 2.0f * p01 * dx * dy + p11 * dy * dy;
-    insert_topk(clamp_logit(-0.5f * mahal), b, top_values, top_indices, k);
+    insert_topk(-0.5f * mahal, b, top_values, top_indices, k);
   }
 
-  float denom = 0.0f;
-#pragma unroll
-  for (int i = 0; i < kMaxTopK; ++i) {
-    if (i >= k) break;
-    float w = expf(top_values[i]);
-    if (weight_floor > 0.0f && w < weight_floor) w = 0.0f;
-    top_values[i] = w;
-    denom += w;
-  }
-  denom = fmaxf(denom, 1.0e-12f);
+  normalize_topk_weights(top_values, k, weight_floor);
 
 #pragma unroll
   for (int i = 0; i < kMaxTopK; ++i) {
     if (i >= k) break;
     out_indices[n * k + i] = top_indices[i];
-    out_weights[n * k + i] = top_values[i] / denom;
+    out_weights[n * k + i] = top_values[i];
   }
 }
 
@@ -116,29 +137,22 @@ __global__ void topk_rx_kernel(
   const float p01 = precision[3 * linear + 1];
   const float p11 = precision[3 * linear + 2];
 
+  // Selection uses the raw logits so the beam ordering is never destroyed by
+  // clamping; normalization afterwards is a stable softmax over the winners.
   for (int b = 0; b < n_beams; ++b) {
     const float dx = centers[2 * b + 0] - ux;
     const float dy = centers[2 * b + 1] - uy;
     const float mahal = p00 * dx * dx + 2.0f * p01 * dx * dy + p11 * dy * dy;
-    insert_topk(clamp_logit(-0.5f * mahal), b, top_values, top_indices, k);
+    insert_topk(-0.5f * mahal, b, top_values, top_indices, k);
   }
 
-  float denom = 0.0f;
-#pragma unroll
-  for (int i = 0; i < kMaxTopK; ++i) {
-    if (i >= k) break;
-    float w = expf(top_values[i]);
-    if (weight_floor > 0.0f && w < weight_floor) w = 0.0f;
-    top_values[i] = w;
-    denom += w;
-  }
-  denom = fmaxf(denom, 1.0e-12f);
+  normalize_topk_weights(top_values, k, weight_floor);
 
 #pragma unroll
   for (int i = 0; i < kMaxTopK; ++i) {
     if (i >= k) break;
     out_indices[linear * k + i] = top_indices[i];
-    out_weights[linear * k + i] = top_values[i] / denom;
+    out_weights[linear * k + i] = top_values[i];
   }
 }
 
@@ -303,10 +317,8 @@ __global__ void backward_rx_gain_kernel(
     const int ri = rx_indices[linear * k_rx + i];
     const float dx = rx_centers[2 * ri + 0] - ux;
     const float dy = rx_centers[2 * ri + 1] - uy;
-    const float mahal = p00 * dx * dx + 2.0f * p01 * dx * dy + p11 * dy * dy;
-    const float raw_logit = -0.5f * mahal;
-    float dlogit = w * (grad_w[i] - weighted_grad);
-    if (raw_logit <= -80.0f) dlogit = 0.0f;
+    // Exact softmax Jacobian; weights zeroed by the floor give dlogit = 0.
+    const float dlogit = w * (grad_w[i] - weighted_grad);
 
     gux += dlogit * (p00 * dx + p01 * dy);
     guy += dlogit * (p01 * dx + p11 * dy);
@@ -387,10 +399,8 @@ __global__ void backward_tx_kernel(
       const int tj = tx_indices[n * k_tx + j];
       const float dx = tx_centers[2 * tj + 0] - ux;
       const float dy = tx_centers[2 * tj + 1] - uy;
-      const float mahal = p00 * dx * dx + 2.0f * p01 * dx * dy + p11 * dy * dy;
-      const float raw_logit = -0.5f * mahal;
-      float dlogit = w * (grad_w[j] - weighted_grad);
-      if (raw_logit <= -80.0f) dlogit = 0.0f;
+      // Exact softmax Jacobian; weights zeroed by the floor give dlogit = 0.
+      const float dlogit = w * (grad_w[j] - weighted_grad);
 
       gux += dlogit * (p00 * dx + p01 * dy);
       guy += dlogit * (p01 * dx + p11 * dy);

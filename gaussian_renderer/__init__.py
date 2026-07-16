@@ -235,7 +235,12 @@ def _gaussian_beam_weights_from_uv(
 
     mahal = inv00 * dx * dx + 2.0 * inv01 * dx * dy + inv11 * dy * dy
 
-    log_weights = torch.clamp(-0.5 * mahal, min=-80.0, max=0.0)
+    # Stable softmax shift on the raw logits: the strongest beam per Gaussian
+    # gets weight exp(0)=1, so the ordering used by the downstream top-k
+    # truncation is preserved and a row can never collapse to all zeros. The
+    # floor consequently acts on weights relative to the strongest beam.
+    log_weights = -0.5 * mahal
+    log_weights = log_weights - log_weights.amax(dim=-1, keepdim=True).detach()
 
     weights = torch.exp(log_weights)
 

@@ -25,8 +25,10 @@ def topk_gaussian_beam_weights(
         precision: ``(..., 3)`` storing ``(p00, p01, p11)``.
         beam_centers_uv: ``(num_beams, 2)``.
         k: number of retained beams; must be positive.
-        weight_floor: optional floor applied to the *unnormalized* Gaussian
-            weights, matching the existing renderer's semantics.
+        weight_floor: optional floor applied to the selected weights relative
+            to the strongest selected beam (whose relative weight is one), so
+            negligible beams can be dropped but the row can never collapse to
+            all zeros.
 
     Returns:
         normalized top-k values and int64 beam indices, each with shape
@@ -59,12 +61,19 @@ def topk_gaussian_beam_weights(
     p11 = precision[..., 2, None]
 
     mahal = p00 * dx.square() + 2.0 * p01 * dx * dy + p11 * dy.square()
-    logits = (-0.5 * mahal).clamp(min=-80.0, max=0.0)
+    # Top-k must run on the raw logits: clamping first flattens distant beams
+    # to a common floor and makes the selection order arbitrary.
+    logits = -0.5 * mahal
 
     top_logits, top_indices = torch.topk(
         logits, k=k_eff, dim=-1, largest=True, sorted=False
     )
-    top_weights = torch.exp(top_logits)
+
+    # Stable softmax over the selected beams: the strongest selected logit is
+    # shifted to zero, so its weight is exp(0)=1 and the normalized weights
+    # always sum to one instead of collapsing when every logit is very small.
+    shifted_logits = top_logits - top_logits.amax(dim=-1, keepdim=True).detach()
+    top_weights = torch.exp(shifted_logits)
 
     if weight_floor > 0.0:
         top_weights = torch.where(

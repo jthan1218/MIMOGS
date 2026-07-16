@@ -52,6 +52,40 @@ def topk_shape_loss(
     return torch.mean((pred_topk - target_topk) ** 2)
 
 
+def composite_magnitude_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    topk_ratio: float = 0.0625,
+    eps: float = 1e-8,
+    return_terms: bool = False,
+):
+    """Scale/shape/top-k reconstruction loss.
+
+    - scale term: raw prediction vs max-normalized target (full-map NMSE).
+    - shape term: max-normalized prediction vs max-normalized target, so the
+      beam-pattern shape is matched independently of the global scale.
+    - top-k term: normalized prediction vs normalized target restricted to the
+      GT top-k bins.
+    """
+    target_n = normalize_mag_map(target, eps=eps)
+    pred_n = normalize_mag_map(pred, eps=eps)
+
+    scale_loss = magnitude_nmse_loss(pred, target_n, eps=eps)
+    shape_loss = magnitude_nmse_loss(pred_n, target_n, eps=eps)
+    topk_loss = topk_shape_loss(pred_n, target_n, topk_ratio=topk_ratio)
+
+    total_loss = 0.4 * scale_loss + 0.4 * shape_loss + 0.2 * topk_loss
+
+    if return_terms:
+        return (
+            total_loss,
+            scale_loss.detach(),
+            shape_loss.detach(),
+            topk_loss.detach(),
+        )
+    return total_loss
+
+
 def hybrid_magnitude_loss(
     pred: torch.Tensor,
     target: torch.Tensor,

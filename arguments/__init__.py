@@ -115,7 +115,7 @@ class OptimizationParams(ParamGroup):
         # model behaves as a single-anchor (LoS / single-bounce) renderer;
         # the optimizer is free to separate the two anchors where the data
         # demands it (multi-bounce paths).
-        self.lambda_anchor = 1
+        self.lambda_anchor = 0.01
 
         super().__init__(parser, "Optimization Parameters")
 
