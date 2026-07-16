@@ -54,6 +54,6 @@ be taken after synchronization, as done in the benchmark script. -->
 
 ```bash
 python train_fast.py
-
+```
 
 Some code snippets are borrowed from [WRF-GS](https://github.com/wenchaozheng/WRF-GS).

@@ -1,8 +1,3 @@
-"""
-The comparison figures are generated from randomly selected test samples
-after training is completed.
-"""
-
 from __future__ import annotations
 
 import os
@@ -183,27 +178,13 @@ def evaluate_and_save_random_test_samples(
                 covariance_floor=1e-4,
                 weight_floor=1e-4,
                 max_active_rx_beams=int(
-                    getattr(
-                        model_params,
-                        "max_active_rx_beams",
-                        2,
-                    )
+                    getattr(model_params, "max_active_rx_beams", 2)
                 ),
                 max_active_tx_beams=int(
-                    getattr(
-                        model_params,
-                        "max_active_tx_beams",
-                        2,
-                    )
+                    getattr(model_params, "max_active_tx_beams", 2)
                 ),
                 use_cuda_rasterizer=bool(
-                    int(
-                        getattr(
-                            model_params,
-                            "use_cuda_rasterizer",
-                            1,
-                        )
-                    )
+                    int(getattr(model_params, "use_cuda_rasterizer", 1))
                 ),
             )
 
@@ -326,63 +307,43 @@ def evaluate_and_save_random_test_samples(
         axes[1].set_ylabel("")
         axes[1].set_aspect("equal")
 
-        predicted_divider = make_axes_locatable(
-            axes[1]
-        )
+        predicted_divider = make_axes_locatable(axes[1])
 
-        predicted_colorbar_axis = (
-            predicted_divider.append_axes(
-                "right",
-                size="3.5%",
-                pad=0.08,
-            )
-        )
-
-        predicted_colorbar = figure.colorbar(
-            predicted_image,
-            cax=predicted_colorbar_axis,
-        )
-
+        predicted_colorbar_axis = predicted_divider.append_axes("right",size="3.5%",pad=0.08)
+        predicted_colorbar = figure.colorbar(predicted_image,cax=predicted_colorbar_axis)
         predicted_colorbar.ax.yaxis.set_major_formatter(
             FormatStrFormatter("%.1f")
         )
         predicted_colorbar.update_ticks()
 
-        figure_path = os.path.join(
-            save_dir,
-            f"{output_index:02d}.png",
-        )
-
-        figure.savefig(
-            figure_path,
-            dpi=150,
-        )
+        figure_path = os.path.join(save_dir,f"{output_index:02d}.png")
+        figure.savefig(figure_path,dpi=150)
 
         plt.close(figure)
 
-    plot_and_save_time = (
-        time.perf_counter()
-        - plot_and_save_start
-    )
+    plot_and_save_time = time.perf_counter() - plot_and_save_start
 
     gaussians.dynamic_gain_net.train()
 
-    print(
-        f"[Evaluation] Saved comparison figures to {save_dir}"
-    )
-    print(
-        f"[Evaluation][Timing] render: "
-        f"{render_time:.4f} s"
-    )
-    # print(
-    #     f"[Evaluation][Timing] device_to_cpu: "
-    #     f"{device_to_cpu_time:.4f} s"
-    # )
-    print(
-        f"[Evaluation][Timing] plot_and_save: "
-        f"{plot_and_save_time:.4f} s"
-    )
+    print(f"[Evaluation] Saved comparison figures to {save_dir}")
+    print(f"[Evaluation][Timing] render: {render_time:.4f} s")
+    print(f"[Evaluation][Timing] plot_and_save: {plot_and_save_time:.4f} s")
 
+def get_avg_opacity(gaussians) -> float:
+    with torch.no_grad():
+        if hasattr(gaussians, "get_opacity"):
+            opacity = gaussians.get_opacity
+        elif hasattr(gaussians, "_opacity"):
+            opacity = torch.sigmoid(gaussians._opacity)
+        elif hasattr(gaussians, "opacity"):
+            opacity = gaussians.opacity
+        else:
+            return float("nan")
+
+        if torch.is_complex(opacity):
+            opacity = torch.abs(opacity)
+
+        return float(opacity.detach().mean().item())
 
 def training(
     model_params,
@@ -402,30 +363,16 @@ def training(
 
     prepare_output_dir(model_params.model_path)
 
-    save_args(
-        model_params.model_path,
-        model_params,
-        opt_params,
-        raw_args,
-    )
+    save_args(model_params.model_path,model_params,opt_params,raw_args)
 
     gaussians = GaussianModel(
-        target_gaussians=int(
-            getattr(
-                model_params,
-                "target_gaussians",
-                25_000,
-            )
-        ),
+        target_gaussians=int(getattr(model_params, "target_gaussians", 25_000)),
         optimizer_type=opt_params.optimizer_type,
         device=str(device),
         init_range=1.0,
     )
 
-    scene = Scene(
-        model_params,
-        gaussians,
-    )
+    scene = Scene(model_params,gaussians)
 
     if (
         getattr(model_params, "init_mode", "random")
@@ -436,61 +383,26 @@ def training(
     else:
         vertices_path = None
 
-    gaussians.gaussian_init(
-        vertices_path=vertices_path
-    )
+    gaussians.gaussian_init(vertices_path=vertices_path)
 
-    total_iterations = (
-        len(scene.train_iter)
-        * scene.num_epochs
-    )
+    total_iterations = len(scene.train_iter)* scene.num_epochs
 
-    opt_params.position_lr_max_steps = max(
-        1,
-        int(0.6 * total_iterations),
-    )
+    opt_params.position_lr_max_steps = max(1,int(0.6 * total_iterations))
 
     gaussians.training_setup(opt_params)
 
-    tx_pos = torch.as_tensor(
-        scene.bs_position,
-        dtype=torch.float32,
-        device=device,
-    )
+    tx_pos = torch.as_tensor(scene.bs_position,dtype=torch.float32,device=device)
 
-    use_amp = (
-        bool(
-            int(
-                getattr(
-                    model_params,
-                    "use_amp",
-                    0,
-                )
-            )
-        )
-        and device.type == "cuda"
-    )
+    use_amp = bool(int(getattr(model_params, "use_amp", 0))) and device.type == "cuda"
 
-    scaler = torch.cuda.amp.GradScaler(
-        enabled=use_amp
-    )
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
-    print(
-        f"[Train] Device: {device} | "
-        f"Source path: {getattr(model_params, 'source_path', '')} | "
-        f"Output path: {model_params.model_path}"
-    )
+    print(f"[Train] Device: {device} | Source path: {getattr(model_params, 'source_path', '')} | Output path: {model_params.model_path}")
 
-    print(
-        f"[Train] Train set size: {len(scene.train_set)} | "
-        f"Test set size: {len(scene.test_set)} | "
-        f"Batch size: {getattr(model_params, 'batch_size', 'unknown')} | "
-        f"Total iterations: {total_iterations} | "
-        f"Epochs: {scene.num_epochs}"
-    )
+    print(f"[Train] Train set size: {len(scene.train_set)} | Test set size: {len(scene.test_set)} | Batch size: {getattr(model_params, 'batch_size', 'unknown')} | Total iterations: {total_iterations} | Epochs: {scene.num_epochs}")
 
     iteration = 0
-    exponential_moving_average_loss = 0.0
+    ema_loss = 0.0
 
     progress_bar = tqdm(
         total=total_iterations,
@@ -503,33 +415,17 @@ def training(
         for magnitude, rx_pos in scene.train_iter:
             iteration += 1
 
-            gaussians.update_learning_rate(
-                iteration
-            )
+            gaussians.update_learning_rate(iteration)
 
-            magnitude = magnitude.to(
-                device,
-                non_blocking=True,
-            )
+            magnitude = magnitude.to(device,non_blocking=True)
 
-            rx_pos = rx_pos.to(
-                device,
-                non_blocking=True,
-            )
+            rx_pos = rx_pos.to(device,non_blocking=True)
 
-            ground_truth_map = magnitude.reshape(
-                magnitude.shape[0],
-                scene.beam_rows,
-                scene.beam_cols,
-            )
+            ground_truth_map = magnitude.reshape(magnitude.shape[0],scene.beam_rows,scene.beam_cols)
 
-            gaussians.optimizer.zero_grad(
-                set_to_none=True
-            )
+            gaussians.optimizer.zero_grad(set_to_none=True)
 
-            gaussians.dynamic_gain_optimizer.zero_grad(
-                set_to_none=True
-            )
+            gaussians.dynamic_gain_optimizer.zero_grad(set_to_none=True)
 
             with torch.cuda.amp.autocast(
                 enabled=use_amp
@@ -557,17 +453,11 @@ def training(
 
                 predicted_map = rendered_output["render"]
 
-                (
-                    reconstruction_loss,
-                    normalized_mse_term,
-                    topk_term,
-                ) = hybrid_magnitude_loss(
+                reconstruction_loss,normalized_mse_term,topk_term = hybrid_magnitude_loss(
                     predicted_map,
                     ground_truth_map,
                     topk_ratio=0.0625,
-                    eps=1e-8,
-                    return_terms=True,
-                )
+                    eps=1e-8,return_terms=True)
 
                 lambda_anchor = float(
                     getattr(
@@ -577,143 +467,86 @@ def training(
                     )
                 )
 
-                anchor_regularization = (
-                    (
-                        gaussians._xyz
-                        - gaussians._xyz_tx
-                    )
-                    .square()
-                    .sum(dim=-1)
-                    .mean()
-                )
+                anchor_regularization = (gaussians._xyz - gaussians._xyz_tx).square().sum(dim=-1).mean()
 
-                total_loss = (
-                    reconstruction_loss
-                    + lambda_anchor
-                    * anchor_regularization
-                )
+                loss = reconstruction_loss+ lambda_anchor* anchor_regularization
 
-            scaler.scale(
-                total_loss
-            ).backward()
+                importance = rendered_output["per_gaussian_importance"].mean(dim=0)
 
-            scaler.step(
-                gaussians.optimizer
-            )
+            scaler.scale(loss).backward()
+            scaler.unscale_(gaussians.optimizer)
+            gaussians.accumulate_training_stats(importance=importance)
 
-            scaler.step(
-                gaussians.dynamic_gain_optimizer
-            )
-
+            scaler.step(gaussians.optimizer)
+            scaler.step(gaussians.dynamic_gain_optimizer)
             scaler.update()
 
-            exponential_moving_average_loss = (
-                0.4
-                * float(
-                    total_loss.detach()
+            # if (
+            #     iteration > 1000
+            #     and iteration < 15000
+            #     and iteration % 1000 == 0
+            # ):
+            #     with torch.no_grad():
+            #         gaussians.densify_and_prune(
+            #             max_grad=1e-4,
+            #             min_opacity=1e-3,
+            #             clone_scale_threshold=0.05,
+            #             split_scale_threshold=0.20,
+            #             importance_threshold=0.0,
+            #             max_scale=None,
+            #             n_splits=2,
+            #         )
+
+            ema_loss = (0.4 * loss.item()+ 0.6 * ema_loss)
+
+            if iteration > 0 and iteration % 1000 == 0:
+                avg_opacity = get_avg_opacity(gaussians)
+                print(
+                    f"nums of gaussians: {gaussians.get_xyz.shape[0]}, "
+                    f"Avg opacity: {avg_opacity:.4f}, "
                 )
-                + 0.6
-                * exponential_moving_average_loss
-            )
 
-            if (
-                iteration % 10 == 0
-                or iteration == total_iterations
-            ):
-                if iteration % 10 == 0:
-                    progress_increment = 10
-                else:
-                    progress_increment = (
-                        total_iterations % 10
-                    )
-
-                progress_bar.update(
-                    progress_increment
-                )
-
+            if iteration % 10 == 0:
                 progress_bar.set_postfix(
-                    loss=(
-                        f"{exponential_moving_average_loss:.6g}"
-                    ),
-                    nmse=(
-                        f"{float(normalized_mse_term):.4g}"
-                    ),
-                    topk=(
-                        f"{float(topk_term):.4g}"
-                    ),
-                    batch=rx_pos.shape[0],
-                    epoch=epoch + 1,
+                    {
+                        "Loss": f"{ema_loss:.8f}"
+                    }
                 )
+                progress_bar.update(10)
 
     progress_bar.close()
 
     # Save Gaussian point cloud.
-    point_cloud_path = os.path.join(
-        model_params.model_path,
-        "point_cloud",
-        "point_cloud.ply",
-    )
+    point_cloud_path = os.path.join(model_params.model_path,"point_cloud","point_cloud.ply")
 
     if hasattr(gaussians, "save_ply"):
         gaussians.save_ply(
             point_cloud_path
         )
 
-        print(
-            f"[Save] Saved point cloud to "
-            f"{point_cloud_path}"
-        )
+        print(f"[Save] Saved point cloud to {point_cloud_path}")
 
     # Save checkpoint.
-    checkpoint_path = os.path.join(
-        model_params.model_path,
-        "model.pth",
-    )
+    checkpoint_path = os.path.join(model_params.model_path,"model.pth")
 
-    torch.save(
-        {
-            "iteration": iteration,
-            "gaussians": gaussians.capture(),
-            "model_params": vars(model_params),
-            "opt_params": vars(opt_params),
-        },
-        checkpoint_path,
-    )
+    torch.save({"iteration": iteration,"gaussians": gaussians.capture(),"model_params": vars(model_params),"opt_params": vars(opt_params)},checkpoint_path)
 
-    print(
-        f"[Save] Saved checkpoint to "
-        f"{checkpoint_path}"
-    )
+    print(f"[Save] Saved checkpoint to {checkpoint_path}")
 
     # Save random test rendering results using the fixed settings above.
-    evaluate_and_save_random_test_samples(
-        scene=scene,
-        gaussians=gaussians,
-        model_params=model_params,
-    )
+    evaluate_and_save_random_test_samples(scene,gaussians,model_params)
 
     print("[Train] Done.")
 
 
 if __name__ == "__main__":
-    parser = ArgumentParser(
-        description="MIMO-GS training"
-    )
+    parser = ArgumentParser(description="MIMO-GS training")
 
     model_params = ModelParams(parser)
     optimization_params = OptimizationParams(parser)
 
-    parser.add_argument(
-        "--quiet",
-        action="store_true",
-        default=False,
-    )
-
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=0,
-    )
+    parser.add_argument("--quiet",action="store_true",default=False)
+    parser.add_argument("--seed",type=int,default=0)
 
     args = get_combined_args(parser)
 
@@ -726,16 +559,7 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
 
-    extracted_model_params = model_params.extract(
-        args
-    )
+    extracted_model_params = model_params.extract(args)
+    extracted_optimization_params = optimization_params.extract(args)
 
-    extracted_optimization_params = (
-        optimization_params.extract(args)
-    )
-
-    training(
-        extracted_model_params,
-        extracted_optimization_params,
-        args,
-    )
+    training(extracted_model_params,extracted_optimization_params,args)
