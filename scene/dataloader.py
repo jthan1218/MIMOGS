@@ -73,7 +73,7 @@ class DeepMIMODataset(Dataset):
 
             print(f"[Dataset] Auto-normalizing positions...")
             print(f"   - Max coordinate found: {max_val:.4f}")
-            print(f"   - Scale factor applied: {self.scale_factor:.4f}")
+            # print(f"   - Scale factor applied: {self.scale_factor:.4f}")
 
             self.positions = self.positions / self.scale_factor
 
@@ -106,7 +106,7 @@ class UmiDataset(Dataset):
 
             print(f"[Dataset] Auto-normalizing positions...")
             print(f"   - Max coordinate found: {max_val:.4f}")
-            print(f"   - Scale factor applied: {self.scale_factor:.4f}")
+            # print(f"   - Scale factor applied: {self.scale_factor:.4f}")
 
             self.positions = self.positions / self.scale_factor
 

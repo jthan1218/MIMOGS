@@ -103,6 +103,93 @@ class DynamicGainNet(nn.Module):
         )
         return self.net(feat)
 
+    def _encoded_parts(self, x: torch.Tensor):
+        """Return PE and reusable sine/cosine components.
+
+        The returned encoding is exactly identical to ``FourierFeatures.forward``.
+        Exposing the components lets ``forward_batched`` construct PE(xyz-rx)
+        via angle-difference identities instead of evaluating trigonometric
+        functions for every Gaussian/query pair.
+        """
+        if self.pe.num_frequencies == 0:
+            encoded = x if self.pe.include_input else x.new_empty(*x.shape[:-1], 0)
+            empty = x.new_empty(*x.shape[:-1], 0, x.shape[-1])
+            return encoded, empty, empty
+
+        freq = self.pe.freq_bands.to(device=x.device, dtype=x.dtype)
+        proj = x.unsqueeze(-2) * freq.view(*([1] * (x.dim() - 1)), -1, 1)
+        sin_part = torch.sin(proj)
+        cos_part = torch.cos(proj)
+        fourier = torch.stack((sin_part, cos_part), dim=-2).reshape(*x.shape[:-1], -1)
+        encoded = torch.cat([x, fourier], dim=-1) if self.pe.include_input else fourier
+        return encoded, sin_part, cos_part
+
+    def forward_batched(self, xyz: torch.Tensor, rx: torch.Tensor) -> torch.Tensor:
+        """Exact batched evaluation for N primitives and B UE positions.
+
+        Args:
+            xyz: ``(N,3)`` receive-side Gaussian anchors.
+            rx: ``(B,3)`` UE positions.
+
+        Returns:
+            Raw dynamic gains with shape ``(B,N,1)``.
+
+        This method is mathematically equivalent to applying ``forward`` to
+        every concatenated ``[xyz, rx, xyz-rx]`` vector.  It is faster because
+        the first linear layer is factorized into its three feature blocks and
+        the position-only block is evaluated once per batch.
+        """
+        if xyz.dim() != 2 or xyz.shape[-1] != 3:
+            raise ValueError(f"xyz must be (N,3), got {tuple(xyz.shape)}")
+        if rx.dim() != 2 or rx.shape[-1] != 3:
+            raise ValueError(f"rx must be (B,3), got {tuple(rx.shape)}")
+
+        pe_xyz, sin_xyz, cos_xyz = self._encoded_parts(xyz)
+        pe_rx, sin_rx, cos_rx = self._encoded_parts(rx)
+
+        rel_raw = xyz.unsqueeze(0) - rx.unsqueeze(1)
+        if self.pe.num_frequencies > 0:
+            sin_rel = (
+                sin_xyz.unsqueeze(0) * cos_rx.unsqueeze(1)
+                - cos_xyz.unsqueeze(0) * sin_rx.unsqueeze(1)
+            )
+            cos_rel = (
+                cos_xyz.unsqueeze(0) * cos_rx.unsqueeze(1)
+                + sin_xyz.unsqueeze(0) * sin_rx.unsqueeze(1)
+            )
+            rel_fourier = torch.stack((sin_rel, cos_rel), dim=-2).reshape(
+                rel_raw.shape[0], rel_raw.shape[1], -1
+            )
+            pe_rel = (
+                torch.cat([rel_raw, rel_fourier], dim=-1)
+                if self.pe.include_input
+                else rel_fourier
+            )
+        else:
+            pe_rel = rel_raw if self.pe.include_input else rel_raw.new_empty(
+                rel_raw.shape[0], rel_raw.shape[1], 0
+            )
+
+        first = self.net[0]
+        pe_dim = self.pe.out_dim
+        w_xyz = first.weight[:, :pe_dim]
+        w_rx = first.weight[:, pe_dim : 2 * pe_dim]
+        w_rel = first.weight[:, 2 * pe_dim :]
+
+        # Bias is added only in the relative block; the three terms are then
+        # broadcast and summed to reproduce Linear([PE_xyz, PE_rx, PE_rel]).
+        h_xyz = F.linear(pe_xyz, w_xyz, None)                       # (N,H)
+        h_rx = F.linear(pe_rx, w_rx, None)                          # (B,H)
+        h_rel = F.linear(pe_rel.reshape(-1, pe_dim), w_rel, first.bias)
+        h = h_rel.view(rx.shape[0], xyz.shape[0], -1)
+        h = h + h_xyz.unsqueeze(0) + h_rx.unsqueeze(1)
+
+        h = self.net[1](h)
+        h = self.net[2](h)
+        h = self.net[3](h)
+        h = self.net[4](h)
+        return h
+
 class GaussianModel:
     """MIMOGS Gaussian scene model
 
@@ -425,29 +512,27 @@ class GaussianModel:
             for param_group in self.dynamic_gain_optimizer.param_groups:
                 param_group["lr"] = dyn_lr
 
-    def get_dynamic_gain_weight(self, rx_pos: torch.Tensor) -> torch.Tensor:
-        """
+    def get_dynamic_gain_weight_batched(self, rx_pos: torch.Tensor) -> torch.Tensor:
+        """Return location-conditioned primitive gains for B UE positions.
+
+        Args:
+            rx_pos: ``(B,3)`` or ``(3,)``.
         Returns:
-            alpha_n * s_n(r), shape (N,1)
-        where
-            alpha_n = opacity_n
-            s_n(r)  = softplus(MLP([xyz, rx, xyz-rx]))
-        no-log-distance ablation: the scalar log-distance feature is removed.
+            ``(B,N)`` tensor containing ``rho_k d_k(p)``.
         """
-        rx = rx_pos.view(1, 3).to(self.device, dtype=self.get_xyz.dtype)
+        rx = rx_pos.to(self.device, dtype=self.get_xyz.dtype)
+        if rx.dim() == 1:
+            rx = rx.view(1, 3)
+        if rx.dim() != 2 or rx.shape[-1] != 3:
+            raise ValueError(f"rx_pos must be (3,) or (B,3), got {tuple(rx.shape)}")
 
-        xyz = self.get_xyz                      # (N,3)
-        rel = xyz - rx                         # (N,3)
-        rx_rep = rx.expand(xyz.shape[0], -1)   # (N,3)
+        raw_gain = self.dynamic_gain_net.forward_batched(self.get_xyz, rx)
+        dynamic_gain = F.softplus(raw_gain).squeeze(-1)            # (B,N)
+        return dynamic_gain * self.get_opacity.squeeze(-1).unsqueeze(0)
 
-        feat = torch.cat(
-            [xyz, rx_rep, rel],
-            dim=-1
-        )                                      # (N,9)
-
-        dynamic_gain = F.softplus(self.dynamic_gain_net(feat))  # (N,1)
-        gain_weight = self.get_opacity * dynamic_gain
-        return gain_weight
+    def get_dynamic_gain_weight(self, rx_pos: torch.Tensor) -> torch.Tensor:
+        """Backward-compatible single-query wrapper returning ``(N,1)``."""
+        return self.get_dynamic_gain_weight_batched(rx_pos).squeeze(0).unsqueeze(-1)
 
     # ------------------------------------------------------------------
     # Statistics for pruning / densification

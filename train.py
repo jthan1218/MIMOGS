@@ -1,444 +1,675 @@
+"""
+The comparison figures are generated from randomly selected test samples
+after training is completed.
+"""
+
+from __future__ import annotations
+
 import os
 import random
+import time
 from argparse import ArgumentParser
 from datetime import datetime
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from matplotlib.ticker import FormatStrFormatter
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 from tqdm import tqdm
 
 from arguments import ModelParams, OptimizationParams, get_combined_args
-from gaussian_renderer import render
-from scene import Scene, GaussianModel
+from gaussian_renderer.fast_renderer import render_fast
+from scene import GaussianModel, Scene
 from utils.general_utils import safe_state
-from torch.utils.data import DataLoader, Subset
-from utils.loss import (hybrid_magnitude_loss, magnitude_mse_loss, normalize_mag_map)
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-from matplotlib.ticker import FormatStrFormatter
+from utils.loss import hybrid_magnitude_loss, normalize_mag_map
 
 
-def prepare_output_dir(model_path: str):
+# Post-training evaluation settings.
+# Change these two values directly; no additional CLI options are required.
+NUM_EVAL_SAMPLES = 50
+EVAL_BATCH_SIZE = 50
+
+
+def make_output_path(base_dir: str = "outputs") -> str:
+    """Create a timestamped output directory path."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return os.path.join(base_dir, timestamp)
+
+
+def prepare_output_dir(model_path: str) -> None:
+    """Create output subdirectories."""
     os.makedirs(model_path, exist_ok=True)
     os.makedirs(os.path.join(model_path, "point_cloud"), exist_ok=True)
     os.makedirs(os.path.join(model_path, "pred_compare"), exist_ok=True)
 
 
-def save_run_args_txt(model_path: str, model_params, opt_params, raw_args):
-    txt_path = os.path.join(model_path, "run_args.txt")
-    with open(txt_path, "w", encoding="utf-8") as f:
-        f.write("[Model Params]\n")
-        for k, v in sorted(vars(model_params).items()):
-            f.write(f"{k}: {v}\n")
+def save_args(
+    path: str,
+    model_params,
+    opt_params,
+    raw_args,
+) -> None:
+    """Save all command-line and model parameters."""
+    os.makedirs(path, exist_ok=True)
 
-        f.write("\n[Optimization Params]\n")
-        for k, v in sorted(vars(opt_params).items()):
-            f.write(f"{k}: {v}\n")
+    args_path = os.path.join(path, "run_args.txt")
 
-        f.write("\n[RawArgs Namespace]\n")
-        for k, v in sorted(vars(raw_args).items()):
-            f.write(f"{k}: {v}\n")
+    with open(args_path, "w", encoding="utf-8") as file:
+        for title, obj in (
+            ("Model Params", model_params),
+            ("Optimization Params", opt_params),
+            ("Raw Args", raw_args),
+        ):
+            file.write(f"[{title}]\n")
 
-def make_timestamp_model_path(base_dir: str = "outputs") -> str:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return os.path.join(base_dir, timestamp)
+            for key, value in sorted(vars(obj).items()):
+                file.write(f"{key}: {value}\n")
+
+            file.write("\n")
 
 
 def evaluate_and_save_random_test_samples(
     scene: Scene,
     gaussians: GaussianModel,
     model_params,
-    num_samples: int = 50,
-):
-    save_dir = os.path.join(model_params.model_path, "pred_compare")
+) -> None:
+    """Render and save comparison figures for random test samples."""
+
+    save_dir = os.path.join(
+        model_params.model_path,
+        "pred_compare",
+    )
     os.makedirs(save_dir, exist_ok=True)
 
-    total = len(scene.test_set)
-    num_samples = min(num_samples, total)
-    rng = random.Random(12345)
-    indices = rng.sample(range(total), num_samples)
+    total_test_samples = len(scene.test_set)
 
-    tx_pos = torch.tensor(
-        scene.bs_position,
-        dtype=torch.float32,
-        device=gaussians.get_xyz.device,
+    if total_test_samples == 0:
+        print("[Evaluation] Test set is empty. Skipping figure generation.")
+        return
+
+    num_samples = min(
+        NUM_EVAL_SAMPLES,
+        total_test_samples,
+    )
+    eval_batch_size = min(
+        max(1, int(EVAL_BATCH_SIZE)),
+        num_samples,
     )
 
-    print(f"[Evaluation] Rendering {num_samples} random test samples...")
+    # Fixed seed ensures that the same test samples are selected every run.
+    random_generator = random.Random(12345)
+    selected_indices = random_generator.sample(
+        range(total_test_samples),
+        num_samples,
+    )
 
-    with torch.no_grad():
-        for rank, idx in enumerate(indices):
-            magnitude, rx_pos = scene.test_set[idx]
+    # Load the selected samples on CPU first, then transfer each stacked
+    # tensor to the model device only once.
+    selected_samples = [
+        scene.test_set[test_index]
+        for test_index in selected_indices
+    ]
 
-            rx_pos = rx_pos.to(gaussians.get_xyz.device)
-            magnitude = magnitude.to(gaussians.get_xyz.device)
-            magnitude = magnitude.reshape(scene.beam_rows, scene.beam_cols)
+    ground_truth_batch_cpu = torch.stack(
+        [
+            magnitude.reshape(
+                scene.beam_rows,
+                scene.beam_cols,
+            )
+            for magnitude, _ in selected_samples
+        ],
+        dim=0,
+    )
 
-            out = render(
-                rx_pos=rx_pos,
+    rx_pos_batch_cpu = torch.stack(
+        [
+            rx_pos.reshape(3)
+            for _, rx_pos in selected_samples
+        ],
+        dim=0,
+    )
+
+    device = gaussians.get_xyz.device
+
+    ground_truth_batch = ground_truth_batch_cpu.to(
+        device,
+        non_blocking=True,
+    )
+
+    rx_pos_batch = rx_pos_batch_cpu.to(
+        device,
+        non_blocking=True,
+    )
+
+    tx_pos = torch.as_tensor(
+        scene.bs_position,
+        dtype=torch.float32,
+        device=device,
+    )
+
+    print(
+        f"[Evaluation] Rendering {num_samples} random test samples "
+        f"with eval batch size {eval_batch_size}..."
+    )
+
+    gaussians.dynamic_gain_net.eval()
+
+    with torch.inference_mode():
+        # Ensure that input transfers are complete before starting the render
+        # timer. CUDA operations are asynchronous.
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+
+        render_start = time.perf_counter()
+        predicted_chunks = []
+
+        for start_index in range(
+            0,
+            num_samples,
+            eval_batch_size,
+        ):
+            end_index = min(
+                start_index + eval_batch_size,
+                num_samples,
+            )
+
+            rendered_output = render_fast(
+                rx_pos=rx_pos_batch[start_index:end_index],
                 tx_pos=tx_pos,
                 pc=gaussians,
                 rx_shape=(2, 2),
                 tx_shape=(4, 4),
-                normalize_beam_weights=False,
+                covariance_floor=1e-4,
                 weight_floor=1e-4,
-                max_active_rx_beams=getattr(model_params, "max_active_rx_beams", 2),
-                max_active_tx_beams=getattr(model_params, "max_active_tx_beams", 2),
-                renormalize_local_beam_weights=getattr(model_params, "renormalize_local_beam_weights", True),
+                max_active_rx_beams=int(
+                    getattr(
+                        model_params,
+                        "max_active_rx_beams",
+                        2,
+                    )
+                ),
+                max_active_tx_beams=int(
+                    getattr(
+                        model_params,
+                        "max_active_tx_beams",
+                        2,
+                    )
+                ),
+                use_cuda_rasterizer=bool(
+                    int(
+                        getattr(
+                            model_params,
+                            "use_cuda_rasterizer",
+                            1,
+                        )
+                    )
+                ),
             )
 
-            pred_mag = out["render"]
+            predicted_chunk = rendered_output["render"]
 
-            # gt_mag_np = magnitude.detach().cpu().numpy()
-            # pred_mag_np = pred_mag.detach().cpu().numpy()
+            # Keep a batch dimension even when a chunk contains one sample.
+            if predicted_chunk.ndim == 2:
+                predicted_chunk = predicted_chunk.unsqueeze(0)
 
-            gt_mag_np = normalize_mag_map(magnitude).detach().cpu().numpy()
-            pred_mag_np = pred_mag.detach().cpu().numpy()
+            predicted_chunks.append(predicted_chunk)
 
-            # fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
 
-            # im0 = axes[0].imshow(gt_mag_np, aspect="equal", interpolation="nearest")
-            # axes[0].set_title("Ground Truth Shape (sample-wise normalized)")
-            # plt.colorbar(im0, ax=axes[0], fraction=0.03, pad=0.04)
+        render_time = time.perf_counter() - render_start
 
-            # im1 = axes[1].imshow(pred_mag_np, aspect="equal", interpolation="nearest")
-            # axes[1].set_title("Predicted Shape (raw scale)")
-            # plt.colorbar(im1, ax=axes[1], fraction=0.03, pad=0.04)
+        # All rendering is complete before any result is transferred to CPU.
+        predicted_batch = torch.cat(
+            predicted_chunks,
+            dim=0,
+        )
 
-            # for ax in axes.ravel():
-            #     ax.set_xlabel("Tx beam index")
-            #     ax.set_ylabel("Rx beam index")
-            #     ax.set_aspect("equal")
+        if predicted_batch.shape[0] != num_samples:
+            raise RuntimeError(
+                "The number of rendered predictions does not match "
+                f"the requested sample count: "
+                f"{predicted_batch.shape[0]} != {num_samples}"
+            )
 
-            # fig.suptitle(f"Test sample idx={idx}", fontsize=12)
-            # fig.tight_layout()
+        ground_truth_normalized = normalize_mag_map(
+            ground_truth_batch
+        )
 
-            fig, axes = plt.subplots(2, 1, figsize=(8, 5), constrained_layout=True)
+        # Exclude concatenation and normalization from transfer timing.
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
 
-            # Top: Ground Truth
-            im0 = axes[0].imshow(gt_mag_np, aspect="equal", interpolation="nearest")
-            axes[0].set_title("Ground Truth")
-            axes[0].set_xlabel("")
-            axes[0].set_ylabel("")
-            axes[0].set_aspect("equal")
+        # device_to_cpu_start = time.perf_counter()
 
-            divider0 = make_axes_locatable(axes[0])
-            cax0 = divider0.append_axes("right", size="3.5%", pad=0.08)
+        predicted_batch_cpu = (
+            predicted_batch
+            .detach()
+            .cpu()
+        )
 
-            cbar0 = fig.colorbar(im0, cax=cax0)
-            cbar0.ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
-            cbar0.update_ticks()
+        ground_truth_batch_cpu = (
+            ground_truth_normalized
+            .detach()
+            .cpu()
+        )
 
-            # Bottom: Predicted
-            im1 = axes[1].imshow(pred_mag_np, aspect="equal", interpolation="nearest")
-            axes[1].set_title("Predicted")
-            axes[1].set_xlabel("")
-            axes[1].set_ylabel("")
-            axes[1].set_aspect("equal")
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
 
-            divider1 = make_axes_locatable(axes[1])
-            cax1 = divider1.append_axes("right", size="3.5%", pad=0.08)
-            cbar1 = fig.colorbar(im1, cax=cax1)
-            cbar1.ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
-            cbar1.update_ticks()
-            
-            fig_path = os.path.join(save_dir, f"{rank:02d}.png")
-            plt.savefig(fig_path, dpi=150)
-            plt.close(fig)
+        # device_to_cpu_time = (
+        #     time.perf_counter()
+        #     - device_to_cpu_start
+        # )
 
-    print(f"[Eval] Saved comparison figures to {save_dir}")
+    # NumPy conversion happens after the measured GPU-to-CPU transfer.
+    predicted_numpy = predicted_batch_cpu.numpy()
+    ground_truth_numpy = ground_truth_batch_cpu.numpy()
 
-def get_avg_opacity(gaussians) -> float:
-    with torch.no_grad():
-        if hasattr(gaussians, "get_opacity"):
-            opacity = gaussians.get_opacity
-        elif hasattr(gaussians, "_opacity"):
-            opacity = torch.sigmoid(gaussians._opacity)
-        elif hasattr(gaussians, "opacity"):
-            opacity = gaussians.opacity
-        else:
-            return float("nan")
+    plot_and_save_start = time.perf_counter()
 
-        if torch.is_complex(opacity):
-            opacity = torch.abs(opacity)
+    for output_index in range(num_samples):
+        ground_truth_map_numpy = ground_truth_numpy[output_index]
+        predicted_map_numpy = predicted_numpy[output_index]
 
-        return float(opacity.detach().mean().item())
+        figure, axes = plt.subplots(
+            2,
+            1,
+            figsize=(8, 5),
+            constrained_layout=True,
+        )
+
+        # Ground-truth map
+        ground_truth_image = axes[0].imshow(
+            ground_truth_map_numpy,
+            aspect="equal",
+            interpolation="nearest",
+        )
+
+        axes[0].set_title("Ground Truth")
+        axes[0].set_xlabel("")
+        axes[0].set_ylabel("")
+        axes[0].set_aspect("equal")
+
+        ground_truth_divider = make_axes_locatable(
+            axes[0]
+        )
+
+        ground_truth_colorbar_axis = (
+            ground_truth_divider.append_axes(
+                "right",
+                size="3.5%",
+                pad=0.08,
+            )
+        )
+
+        ground_truth_colorbar = figure.colorbar(
+            ground_truth_image,
+            cax=ground_truth_colorbar_axis,
+        )
+
+        ground_truth_colorbar.ax.yaxis.set_major_formatter(
+            FormatStrFormatter("%.1f")
+        )
+        ground_truth_colorbar.update_ticks()
+
+        # Predicted map
+        predicted_image = axes[1].imshow(
+            predicted_map_numpy,
+            aspect="equal",
+            interpolation="nearest",
+        )
+
+        axes[1].set_title("Predicted")
+        axes[1].set_xlabel("")
+        axes[1].set_ylabel("")
+        axes[1].set_aspect("equal")
+
+        predicted_divider = make_axes_locatable(
+            axes[1]
+        )
+
+        predicted_colorbar_axis = (
+            predicted_divider.append_axes(
+                "right",
+                size="3.5%",
+                pad=0.08,
+            )
+        )
+
+        predicted_colorbar = figure.colorbar(
+            predicted_image,
+            cax=predicted_colorbar_axis,
+        )
+
+        predicted_colorbar.ax.yaxis.set_major_formatter(
+            FormatStrFormatter("%.1f")
+        )
+        predicted_colorbar.update_ticks()
+
+        figure_path = os.path.join(
+            save_dir,
+            f"{output_index:02d}.png",
+        )
+
+        figure.savefig(
+            figure_path,
+            dpi=150,
+        )
+
+        plt.close(figure)
+
+    plot_and_save_time = (
+        time.perf_counter()
+        - plot_and_save_start
+    )
+
+    gaussians.dynamic_gain_net.train()
+
+    print(
+        f"[Evaluation] Saved comparison figures to {save_dir}"
+    )
+    print(
+        f"[Evaluation][Timing] render: "
+        f"{render_time:.4f} s"
+    )
+    # print(
+    #     f"[Evaluation][Timing] device_to_cpu: "
+    #     f"{device_to_cpu_time:.4f} s"
+    # )
+    print(
+        f"[Evaluation][Timing] plot_and_save: "
+        f"{plot_and_save_time:.4f} s"
+    )
 
 
-########################################################
-# Training loop
-########################################################
-def training(model_params, opt_params, raw_args):
-    device = torch.device(model_params.data_device if torch.cuda.is_available() else "cpu")
+def training(
+    model_params,
+    opt_params,
+    raw_args,
+) -> None:
+    """Run batched MIMO-GS training."""
+
+    device = torch.device(
+        model_params.data_device
+        if torch.cuda.is_available()
+        else "cpu"
+    )
 
     if not getattr(model_params, "model_path", None):
-        model_params.model_path = make_timestamp_model_path("outputs")
-    
+        model_params.model_path = make_output_path()
+
     prepare_output_dir(model_params.model_path)
-    save_run_args_txt(model_params.model_path, model_params, opt_params, raw_args)
+
+    save_args(
+        model_params.model_path,
+        model_params,
+        opt_params,
+        raw_args,
+    )
 
     gaussians = GaussianModel(
-        target_gaussians = 25_000,
-        optimizer_type = opt_params.optimizer_type,
-        device = str(device),
-        init_range = 1,
+        target_gaussians=int(
+            getattr(
+                model_params,
+                "target_gaussians",
+                25_000,
+            )
+        ),
+        optimizer_type=opt_params.optimizer_type,
+        device=str(device),
+        init_range=1.0,
     )
 
-    scene = Scene(model_params, gaussians)
+    scene = Scene(
+        model_params,
+        gaussians,
+    )
 
-    # --------------------------------------------------
-    # Debug: overfit fixed 16 train samples
-    # --------------------------------------------------
-    fixed_subset_debug = False
-    fixed_indices = list(range(256))
-
-    if fixed_subset_debug:
-        subset = Subset(scene.train_set, fixed_indices)
-        scene.train_iter = DataLoader(
-            subset,
-            batch_size=1,
-            shuffle=False,
-            num_workers=0,
-        )
-        scene.num_epochs = 1000
-    ########################################################
-
-
-    if getattr(model_params, "init_mode", "random") == "vertices" and getattr(model_params, "vertices_path",""):
-        gaussians.gaussian_init(vertices_path=model_params.vertices_path)
+    if (
+        getattr(model_params, "init_mode", "random")
+        == "vertices"
+        and getattr(model_params, "vertices_path", "")
+    ):
+        vertices_path = model_params.vertices_path
     else:
-        gaussians.gaussian_init(vertices_path=None)
+        vertices_path = None
 
-    num_epochs = scene.num_epochs
-    total_iterations = len(scene.train_iter) * num_epochs
-    opt_params.position_lr_max_steps = int(0.6 * total_iterations) 
+    gaussians.gaussian_init(
+        vertices_path=vertices_path
+    )
+
+    total_iterations = (
+        len(scene.train_iter)
+        * scene.num_epochs
+    )
+
+    opt_params.position_lr_max_steps = max(
+        1,
+        int(0.6 * total_iterations),
+    )
+
     gaussians.training_setup(opt_params)
 
-    tx_pos = torch.tensor(
+    tx_pos = torch.as_tensor(
         scene.bs_position,
         dtype=torch.float32,
-        device = device,
+        device=device,
     )
 
-    # --------------------------------------------------
-    # Debug: fixed-subset overfit diagnostics
-    # --------------------------------------------------
-    debug_fixed_subset = True
-    debug_indices = fixed_indices if debug_fixed_subset else [0]
+    use_amp = (
+        bool(
+            int(
+                getattr(
+                    model_params,
+                    "use_amp",
+                    0,
+                )
+            )
+        )
+        and device.type == "cuda"
+    )
 
-    def compute_subset_debug_stats(indices):
-        rows = []
+    scaler = torch.cuda.amp.GradScaler(
+        enabled=use_amp
+    )
 
-        with torch.no_grad():
-            for idx in indices:
-                dbg_mag, dbg_rx = scene.train_set[idx]
-                dbg_mag = dbg_mag.to(device).reshape(scene.beam_rows, scene.beam_cols)
-                dbg_rx = dbg_rx.to(device)
+    print(
+        f"[Train] Device: {device} | "
+        f"Source path: {getattr(model_params, 'source_path', '')} | "
+        f"Output path: {model_params.model_path}"
+    )
 
-                dbg_gt_mag = dbg_mag
+    print(
+        f"[Train] Train set size: {len(scene.train_set)} | "
+        f"Test set size: {len(scene.test_set)} | "
+        f"Batch size: {getattr(model_params, 'batch_size', 'unknown')} | "
+        f"Total iterations: {total_iterations} | "
+        f"Epochs: {scene.num_epochs}"
+    )
 
-                dbg_out = render(
-                    rx_pos=dbg_rx,
+    iteration = 0
+    exponential_moving_average_loss = 0.0
+
+    progress_bar = tqdm(
+        total=total_iterations,
+        desc="MIMO-GS training",
+    )
+
+    gaussians.dynamic_gain_net.train()
+
+    for epoch in range(scene.num_epochs):
+        for magnitude, rx_pos in scene.train_iter:
+            iteration += 1
+
+            gaussians.update_learning_rate(
+                iteration
+            )
+
+            magnitude = magnitude.to(
+                device,
+                non_blocking=True,
+            )
+
+            rx_pos = rx_pos.to(
+                device,
+                non_blocking=True,
+            )
+
+            ground_truth_map = magnitude.reshape(
+                magnitude.shape[0],
+                scene.beam_rows,
+                scene.beam_cols,
+            )
+
+            gaussians.optimizer.zero_grad(
+                set_to_none=True
+            )
+
+            gaussians.dynamic_gain_optimizer.zero_grad(
+                set_to_none=True
+            )
+
+            with torch.cuda.amp.autocast(
+                enabled=use_amp
+            ):
+                rendered_output = render_fast(
+                    rx_pos=rx_pos,
                     tx_pos=tx_pos,
                     pc=gaussians,
                     rx_shape=(2, 2),
                     tx_shape=(4, 4),
-                    normalize_beam_weights=False,
+                    covariance_floor=1e-4,
                     weight_floor=1e-4,
-                    max_active_rx_beams=getattr(model_params, "max_active_rx_beams", 2),
-                    max_active_tx_beams=getattr(model_params, "max_active_tx_beams", 2),
-                    renormalize_local_beam_weights=getattr(model_params, "renormalize_local_beam_weights", True),
-                )
-                dbg_pred_mag = dbg_out["render"]
-
-                dbg_gt_shape = normalize_mag_map(dbg_gt_mag)
-                dbg_pred_shape = normalize_mag_map(dbg_pred_mag)
-
-                loss_val = magnitude_mse_loss(dbg_pred_shape, dbg_gt_shape).item()
-                zero_val = torch.mean(dbg_gt_shape ** 2).item()
-                ratio_val = loss_val / max(zero_val, 1e-12)
-
-                rows.append({
-                    "idx": idx,
-                    "loss": loss_val,
-                    "zero": zero_val,
-                    "ratio_to_zero": ratio_val,
-                })
-
-        mean_loss = sum(r["loss"] for r in rows) / len(rows)
-        mean_zero = sum(r["zero"] for r in rows) / len(rows)
-        mean_ratio = sum(r["ratio_to_zero"] for r in rows) / len(rows)
-
-        return rows, mean_loss, mean_zero, mean_ratio
-
-    init_rows, init_loss, zero_loss, init_ratio = compute_subset_debug_stats(debug_indices)
-
-    print(f"[Debug] subset mean init loss: {init_loss:.8f}")
-    print(f"[Debug] subset mean zero baseline: {zero_loss:.8f}")
-    print(f"[Debug] subset mean init ratio_to_zero: {init_ratio:.8f}")
-    ########################################################
-
-    print(f"[Train] Device: {device}")
-    print(f"[Train] Source path: {getattr(model_params, 'source_path', '')}")
-    print(f"[Train] Output path: {model_params.model_path}")
-    print(f"[Train] Train set size: {len(scene.train_set)}")
-    print(f"[Train] Test set size: {len(scene.test_set)}")
-    print(f"[Train] Total iterations: {total_iterations}")
-
-    iteration = 0
-    ema_loss = 0.0
-    progress_bar = tqdm(total = total_iterations, desc = "Training progress")
-
-    for epoch in range(num_epochs):
-        for batch in scene.train_iter:
-            iteration += 1
-            gaussians.update_learning_rate(iteration)
-
-            magnitude, rx_pos = batch
-
-            magnitude = magnitude.squeeze(0).to(device)
-            rx_pos = rx_pos.squeeze(0).to(device)
-
-            gt_mag = magnitude.reshape(scene.beam_rows, scene.beam_cols)
-
-            out = render(
-                rx_pos=rx_pos,
-                tx_pos=tx_pos,
-                pc=gaussians,
-                rx_shape=(2, 2),
-                tx_shape=(4, 4),
-                normalize_beam_weights=False,
-                weight_floor=1e-4,
-                max_active_rx_beams=getattr(model_params, "max_active_rx_beams", 2),
-                max_active_tx_beams=getattr(model_params, "max_active_tx_beams", 2),
-                renormalize_local_beam_weights=getattr(model_params, "renormalize_local_beam_weights", True),
-            )
-            pred_mag = out["render"]
-
-            importance = out["per_gaussian_importance"]
-
-            loss, abs_loss_dbg, topk_loss_dbg = hybrid_magnitude_loss(
-                pred_mag,
-                gt_mag,
-                topk_ratio=0.0625,
-                eps=1e-8,
-                return_terms=True,
-            )
-
-            # Anchor-tie regularizer: pulls per-Gaussian Tx anchor toward Rx anchor.
-            lambda_anchor = float(getattr(opt_params, "lambda_anchor", 1))
-            anchor_reg = ((gaussians._xyz - gaussians._xyz_tx) ** 2).sum(dim=-1).mean()
-            loss = loss + lambda_anchor * anchor_reg
-
-            gaussians.optimizer.zero_grad(set_to_none=True)
-            gaussians.dynamic_gain_optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            gaussians.accumulate_training_stats(importance=importance)
-            gaussians.optimizer.step()
-            gaussians.dynamic_gain_optimizer.step()
-
-
-            # Densify and prune OFF FOR DEBUGGING
-            # if iteration > 1000 and iteration < 15000 and iteration % 1000 == 0:
-            #     with torch.no_grad():
-            #         gaussians.densify_and_prune(
-            #             max_grad = 1e-4,
-            #             min_opacity = 1e-3,
-            #             min_gain_mag = 1e-4,
-            #             clone_scale_threshold=0.05,
-            #             split_scale_threshold=0.20,
-            #             importance_threshold=0.0,
-            #             max_scale = None,
-            #             n_splits = 2,
-            #         )
-            
-            if iteration > 1000 and iteration % 1000 == 0:
-
-                dyn_grad_norm = 0.0
-                for p in gaussians.dynamic_gain_net.parameters():
-                    if p.grad is not None:
-                        dyn_grad_norm += p.grad.norm().item()
-
-                with torch.no_grad():
-                    xyz_tx_grad = (
-                        gaussians._xyz_tx.grad.norm().item()
-                        if gaussians._xyz_tx.grad is not None
-                        else 0.0
-                    )
-                    anchor_sep = (gaussians._xyz - gaussians._xyz_tx).norm(dim=-1).mean().item()
-                    print(
-                        f"grad xyz={gaussians._xyz.grad.norm().item():.3e}, "
-                        f"xyz_tx={xyz_tx_grad:.3e}, "
-                        f"opacity={gaussians._opacity.grad.norm().item():.3e}, "
-                        f"scaling={gaussians._scaling.grad.norm().item():.3e}, "
-                        f"rotation={gaussians._rotation.grad.norm().item():.3e}, "
-                        # f"gain_mag={gaussians._gain_mag.grad.norm().item():.3e}, "
-                        f"dyn_gain={dyn_grad_norm:.3e}, "
-                        f"mean||xyz-xyz_tx||={anchor_sep:.3e}"
-                    )
-
-            if iteration > 0 and iteration % 1000 == 0:
-                avg_opacity = get_avg_opacity(gaussians)
-                print(
-                    f"nums of gaussians: {gaussians.get_xyz.shape[0]}, "
-                    f"Avg opacity: {avg_opacity:.4f}, "
-                    f"abs_loss: {float(abs_loss_dbg):.8f}, "
-                    f"topk_loss: {float(topk_loss_dbg):.8f}, "
+                    max_active_rx_beams=int(
+                        model_params.max_active_rx_beams
+                    ),
+                    max_active_tx_beams=int(
+                        model_params.max_active_tx_beams
+                    ),
+                    use_cuda_rasterizer=bool(
+                        int(
+                            model_params.use_cuda_rasterizer
+                        )
+                    ),
                 )
 
-            ema_loss = 0.4 * loss.item() + 0.6 * ema_loss
-            if iteration % 10 == 0:
+                predicted_map = rendered_output["render"]
+
+                (
+                    reconstruction_loss,
+                    normalized_mse_term,
+                    topk_term,
+                ) = hybrid_magnitude_loss(
+                    predicted_map,
+                    ground_truth_map,
+                    topk_ratio=0.0625,
+                    eps=1e-8,
+                    return_terms=True,
+                )
+
+                lambda_anchor = float(
+                    getattr(
+                        opt_params,
+                        "lambda_anchor",
+                        1.0,
+                    )
+                )
+
+                anchor_regularization = (
+                    (
+                        gaussians._xyz
+                        - gaussians._xyz_tx
+                    )
+                    .square()
+                    .sum(dim=-1)
+                    .mean()
+                )
+
+                total_loss = (
+                    reconstruction_loss
+                    + lambda_anchor
+                    * anchor_regularization
+                )
+
+            scaler.scale(
+                total_loss
+            ).backward()
+
+            scaler.step(
+                gaussians.optimizer
+            )
+
+            scaler.step(
+                gaussians.dynamic_gain_optimizer
+            )
+
+            scaler.update()
+
+            exponential_moving_average_loss = (
+                0.4
+                * float(
+                    total_loss.detach()
+                )
+                + 0.6
+                * exponential_moving_average_loss
+            )
+
+            if (
+                iteration % 10 == 0
+                or iteration == total_iterations
+            ):
+                if iteration % 10 == 0:
+                    progress_increment = 10
+                else:
+                    progress_increment = (
+                        total_iterations % 10
+                    )
+
+                progress_bar.update(
+                    progress_increment
+                )
+
                 progress_bar.set_postfix(
-                    {
-                        "Loss": f"{ema_loss:.8f}"
-                    }
+                    loss=(
+                        f"{exponential_moving_average_loss:.6g}"
+                    ),
+                    nmse=(
+                        f"{float(normalized_mse_term):.4g}"
+                    ),
+                    topk=(
+                        f"{float(topk_term):.4g}"
+                    ),
+                    batch=rx_pos.shape[0],
+                    epoch=epoch + 1,
                 )
-                progress_bar.update(10)
 
     progress_bar.close()
 
-    # --------------------------------------------------
-    # Debug: fixed-subset overfit diagnostics (final)
-    # --------------------------------------------------
-    final_rows, final_loss, final_zero, final_ratio = compute_subset_debug_stats(debug_indices)
+    # Save Gaussian point cloud.
+    point_cloud_path = os.path.join(
+        model_params.model_path,
+        "point_cloud",
+        "point_cloud.ply",
+    )
 
-    print(f"[Debug] subset mean final loss: {final_loss:.8f}")
-    print(f"[Debug] loss ratio final/init: {final_loss / max(init_loss, 1e-12):.8f}")
-    print(f"[Debug] loss ratio final/zero: {final_loss / max(zero_loss, 1e-12):.8f}")
-    print(f"[Debug] subset mean final ratio_to_zero: {final_ratio:.8f}")
+    if hasattr(gaussians, "save_ply"):
+        gaussians.save_ply(
+            point_cloud_path
+        )
 
-    # --------------------------------------------------
-    # Save per-sample debug distribution
-    # --------------------------------------------------
-    debug_csv_path = os.path.join(model_params.model_path, "debug_subset_losses.csv")
-    with open(debug_csv_path, "w") as f:
-        f.write("idx,init_loss,final_loss,zero_loss,init_ratio_to_zero,final_ratio_to_zero\n")
-        for r0, rT in zip(init_rows, final_rows):
-            f.write(
-                f"{r0['idx']},"
-                f"{r0['loss']:.8f},"
-                f"{rT['loss']:.8f},"
-                f"{rT['zero']:.8f},"
-                f"{r0['ratio_to_zero']:.8f},"
-                f"{rT['ratio_to_zero']:.8f}\n"
-            )
+        print(
+            f"[Save] Saved point cloud to "
+            f"{point_cloud_path}"
+        )
 
-    final_ratios = [r["ratio_to_zero"] for r in final_rows]
-    final_ratios_sorted = sorted(final_ratios)
+    # Save checkpoint.
+    checkpoint_path = os.path.join(
+        model_params.model_path,
+        "model.pth",
+    )
 
-    print(f"[Debug] per-sample final ratio_to_zero min: {final_ratios_sorted[0]:.8f}")
-    print(f"[Debug] per-sample final ratio_to_zero median: {final_ratios_sorted[len(final_ratios_sorted)//2]:.8f}")
-    print(f"[Debug] per-sample final ratio_to_zero max: {final_ratios_sorted[-1]:.8f}")
-    print(f"[Debug] saved per-sample debug csv to: {debug_csv_path}")
-    ########################################################
-
-    # --------------------------------------------------
-    # Final save
-    point_cloud_path = os.path.join(model_params.model_path, "point_cloud", "point_cloud.ply")
-    gaussians.save_ply(point_cloud_path)
-    print(f"[Save] Saved point cloud to {point_cloud_path}")
-
-    model_ckpt = os.path.join(model_params.model_path, "model.pth")
     torch.save(
         {
             "iteration": iteration,
@@ -446,38 +677,65 @@ def training(model_params, opt_params, raw_args):
             "model_params": vars(model_params),
             "opt_params": vars(opt_params),
         },
-        model_ckpt,
+        checkpoint_path,
     )
-    print(f"[Save] Saved model checkpoint to {model_ckpt}")
 
+    print(
+        f"[Save] Saved checkpoint to "
+        f"{checkpoint_path}"
+    )
+
+    # Save random test rendering results using the fixed settings above.
     evaluate_and_save_random_test_samples(
-        scene = scene,
-        gaussians = gaussians,
-        model_params = model_params,
-        num_samples = 50,
+        scene=scene,
+        gaussians=gaussians,
+        model_params=model_params,
     )
 
     print("[Train] Done.")
 
+
 if __name__ == "__main__":
-    parser = ArgumentParser(description="MIMOGS training script")
+    parser = ArgumentParser(
+        description="MIMO-GS training"
+    )
 
     model_params = ModelParams(parser)
-    opt_params = OptimizationParams(parser)
+    optimization_params = OptimizationParams(parser)
 
-    parser.add_argument("--quiet", action="store_true", default=False)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        default=False,
+    )
+
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+    )
 
     args = get_combined_args(parser)
 
     safe_state(args.quiet)
+
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
+
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
 
-    mp = model_params.extract(args)
-    op = opt_params.extract(args)
+    extracted_model_params = model_params.extract(
+        args
+    )
 
-    training(mp, op, args)
+    extracted_optimization_params = (
+        optimization_params.extract(args)
+    )
+
+    training(
+        extracted_model_params,
+        extracted_optimization_params,
+        args,
+    )

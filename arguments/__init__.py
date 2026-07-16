@@ -66,6 +66,15 @@ class ModelParams(ParamGroup):
         self.max_active_tx_beams = 2
         self.renormalize_local_beam_weights = True
 
+        # Fast renderer/training settings. Integers are used instead of bools
+        # so both 0 and 1 can be supplied through the existing ParamGroup.
+        self.batch_size = 8
+        self.num_workers = 0
+        self.num_epochs = 10
+        self.target_gaussians = 25_000
+        self.use_cuda_rasterizer = 1
+        self.use_amp = 0
+
         super().__init__(parser, "Model Parameters", sentinel)
 
     def extract(self, args):

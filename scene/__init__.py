@@ -63,8 +63,8 @@ class Scene:
         self.loaded_iter = None
         self.gaussians = gaussians
 
-        self.batch_size = 1
-        self.num_epochs = 10
+        self.batch_size = int(getattr(args, "batch_size", 8))
+        self.num_epochs = int(getattr(args, "num_epochs", 10)) # no changes
 
         self.datadir = os.path.abspath(args.source_path)
 
@@ -110,14 +110,17 @@ class Scene:
             self.train_set,
             batch_size=self.batch_size,
             shuffle=shuffle,
-            num_workers=0,
+            num_workers=int(getattr(args, "num_workers", 0)),
+            pin_memory=torch.cuda.is_available(),
+            drop_last=False,
         )
 
         self.test_iter = DataLoader(
             self.test_set,
             batch_size=self.batch_size,
             shuffle=False,
-            num_workers=0,
+            num_workers=int(getattr(args, "num_workers", 0)),
+            pin_memory=torch.cuda.is_available(),
             )
 
     def save(self, iteration):

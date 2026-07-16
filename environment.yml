@@ -3,32 +3,21 @@ channels:
   - pytorch
   - nvidia
   - conda-forge
+
 dependencies:
-  - python=3.8
-  - pip=24.2
-
+  - python=3.10
+  - pip
+  - setuptools
+  - wheel
   - pytorch=1.13.1
-  - torchvision=0.14.1
-  - torchaudio=0.13.1
   - pytorch-cuda=11.6
-
-  - mkl=2024.0.0
+  - numpy<2
+  - scipy
+  - pandas
   - pyyaml
   - plyfile
   - tqdm
-  - einops
   - imageio
   - matplotlib
-  - numpy
-  - pandas
-  - scipy
-  - scikit-image
-  - pillow
-  - libtiff
-
-  - pip:
-    - opencv-python
-    - joblib
-    # - submodules/diff-gaussian-rasterization
-    # - submodules/simple-knn
-    # - submodules/fused-ssim
+  - ninja
+  - pytest
