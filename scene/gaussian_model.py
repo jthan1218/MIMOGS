@@ -57,7 +57,7 @@ class FourierFeatures(nn.Module):
 class DynamicGainNet(nn.Module):
     def __init__(
         self,
-        hidden_dim: int = 64,
+        hidden_dim: int = 128,
         init_gain: float = 0.1,
         num_frequencies: int = 6,
         include_input: bool = True,
