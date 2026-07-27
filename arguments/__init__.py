@@ -51,22 +51,26 @@ class ModelParams(ParamGroup):
     """
 
     def __init__(self, parser: ArgumentParser, sentinel: bool = False):
-        self._source_path = "./dataset/asu_campus_4by16_quarter"
+        self._source_path = "./dataset/asu_campus_16by64_outdoor"
         self._model_path = ""
         self.data_device = "cuda"
         self.eval = False
 
-        # the value varies from dataset to dataset
-        self.rx_num_beams = 4
-        self.tx_num_beams = 16
+        # Array shape overrides, (horizontal, vertical) per side.  0 means the
+        # shape is derived from the beam count found in the dataset, which is
+        # the square factorization.  Set these only for a non-square UPA.
+        self.rx_shape_h = 0
+        self.rx_shape_v = 0
+        self.tx_shape_h = 0
+        self.tx_shape_v = 0
 
         self.init_mode = "random"
         self.vertices_path = ""
-        self.max_active_rx_beams = 2
-        self.max_active_tx_beams = 2
+        self.max_active_rx_beams = 4
+        self.max_active_tx_beams = 4
         self.renormalize_local_beam_weights = True
 
-        # Fast renderer/training settings. Integers are used instead of bools
+        # Renderer/training settings. Integers are used instead of bools
         # so both 0 and 1 can be supplied through the existing ParamGroup.
         self.batch_size = 8
         self.num_workers = 0

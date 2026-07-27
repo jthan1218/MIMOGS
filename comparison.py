@@ -139,10 +139,11 @@ def build_parser():
     parser.add_argument("--random_trials", type=int, default=100)
     parser.add_argument("--disable_random_baseline", action="store_true")
 
-    parser.add_argument("--rx_shape_h", type=int, default=2)
-    parser.add_argument("--rx_shape_v", type=int, default=2)
-    parser.add_argument("--tx_shape_h", type=int, default=4)
-    parser.add_argument("--tx_shape_v", type=int, default=4)
+    # 0 means the array shape is derived from the dataset's beam counts.
+    parser.add_argument("--rx_shape_h", type=int, default=0)
+    parser.add_argument("--rx_shape_v", type=int, default=0)
+    parser.add_argument("--tx_shape_h", type=int, default=0)
+    parser.add_argument("--tx_shape_v", type=int, default=0)
 
     return parser, model_params
 
@@ -186,8 +187,10 @@ def build_scene_params(args):
         source_path=args.source_path,
         data_device=args.device,
         eval=True,
-        rx_num_beams=int(args.rx_num_beams),
-        tx_num_beams=int(args.tx_num_beams),
+        rx_shape_h=int(args.rx_shape_h),
+        rx_shape_v=int(args.rx_shape_v),
+        tx_shape_h=int(args.tx_shape_h),
+        tx_shape_v=int(args.tx_shape_v),
         max_active_rx_beams=int(args.max_active_rx_beams),
         max_active_tx_beams=int(args.max_active_tx_beams),
         renormalize_local_beam_weights=bool(args.renormalize_local_beam_weights),
@@ -331,8 +334,8 @@ def evaluate(args):
                 rx_pos=rx_pos,
                 tx_pos=tx_pos,
                 pc=gaussians,
-                rx_shape=(int(args.rx_shape_h), int(args.rx_shape_v)),
-                tx_shape=(int(args.tx_shape_h), int(args.tx_shape_v)),
+                rx_shape=scene.rx_shape,
+                tx_shape=scene.tx_shape,
                 normalize_beam_weights=False,
                 weight_floor=1e-4,
                 max_active_rx_beams=int(args.max_active_rx_beams),

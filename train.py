@@ -112,8 +112,8 @@ def evaluate_and_save_random_test_samples(
                 rx_pos=rx_pos_batch[start_index:end_index],
                 tx_pos=tx_pos,
                 pc=gaussians,
-                rx_shape=(2, 2),
-                tx_shape=(4, 4),
+                rx_shape=scene.rx_shape,
+                tx_shape=scene.tx_shape,
                 covariance_floor=1e-4,
                 weight_floor=1e-4,
                 max_active_rx_beams=int(getattr(model_params, "max_active_rx_beams", 2)),
@@ -252,8 +252,8 @@ def evaluate_full_test_quality(
                 rx_pos=rx_pos.reshape(-1, 3),
                 tx_pos=tx_pos,
                 pc=gaussians,
-                rx_shape=(2, 2),
-                tx_shape=(4, 4),
+                rx_shape=scene.rx_shape,
+                tx_shape=scene.tx_shape,
                 covariance_floor=1e-4,
                 weight_floor=1e-4,
                 max_active_rx_beams=int(getattr(model_params, "max_active_rx_beams", 2)),
@@ -351,6 +351,8 @@ def training(
 
     print(f"[Train] Train set size: {len(scene.train_set)} | Test set size: {len(scene.test_set)} | Batch size: {getattr(model_params, 'batch_size', 'unknown')} | Total iterations: {total_iterations} | Epochs: {scene.num_epochs}")
 
+    print(f"[Train] Beam grid: Rx {scene.rx_shape} = {scene.beam_rows} beams | Tx {scene.tx_shape} = {scene.beam_cols} beams")
+
     iteration = 0
     ema_loss = 0.0
 
@@ -376,8 +378,8 @@ def training(
                     rx_pos=rx_pos,
                     tx_pos=tx_pos,
                     pc=gaussians,
-                    rx_shape=(2, 2),
-                    tx_shape=(4, 4),
+                    rx_shape=scene.rx_shape,
+                    tx_shape=scene.tx_shape,
                     covariance_floor=1e-4,
                     weight_floor=1e-4,
                     max_active_rx_beams=int(

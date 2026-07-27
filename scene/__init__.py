@@ -1,3 +1,4 @@
+import math
 import os
 import yaml
 
@@ -9,6 +10,25 @@ from arguments import ModelParams
 from scene.dataloader import *
 import numpy as np
 import torch
+
+def square_array_shape(num_beams: int) -> tuple:
+    """Factor a beam count into the most square (horizontal, vertical) UPA shape.
+
+    The DFT beam grid is built from the array geometry, so the factorization has
+    to match the array the dataset was generated with.  Every dataset in this
+    repository uses a square array (4, 16, 64 and 100 beams), and a square shape
+    is also the only one that cannot be silently transposed by swapping the two
+    axes -- see ``_build_beam_uv_grid`` in the renderer.
+    """
+    num_beams = int(num_beams)
+    if num_beams < 1:
+        raise ValueError(f"beam count must be positive, got {num_beams}")
+
+    horizontal = math.isqrt(num_beams)
+    while horizontal > 1 and num_beams % horizontal:
+        horizontal -= 1
+    return (horizontal, num_beams // horizontal)
+
 
 def build_power_balanced_weights(dataset, num_bins: int = 12):
     powers = (
@@ -68,9 +88,6 @@ class Scene:
 
         self.datadir = os.path.abspath(args.source_path)
 
-        self.beam_rows = 4
-        self.beam_cols = 16
-
         # BS metadata
         yaml_file_path = os.path.join(self.datadir, "bs_info.yml")
         with open(yaml_file_path, "r", encoding="utf-8") as file:
@@ -106,6 +123,19 @@ class Scene:
         self.train_set = dataset_cls(train_mat_path)
         self.test_set = dataset_cls(test_mat_path)
 
+        # The beam grid is dictated by the data: magnitude is (N, Nr, Nt).
+        magnitude_shape = tuple(self.train_set.magnitude.shape)
+        if len(magnitude_shape) != 3:
+            raise ValueError(f"magnitude must be (N, Nr, Nt); got {magnitude_shape} in {train_mat_path}")
+
+        self.beam_rows = int(magnitude_shape[1])
+        self.beam_cols = int(magnitude_shape[2])
+
+        # Array shapes default to the square factorization of the beam counts.
+        # Non-square UPAs are declared explicitly through the override args.
+        self.rx_shape = self._resolve_array_shape(args, "rx", self.beam_rows)
+        self.tx_shape = self._resolve_array_shape(args, "tx", self.beam_cols)
+
         self.train_iter = DataLoader(
             self.train_set,
             batch_size=self.batch_size,
@@ -122,6 +152,26 @@ class Scene:
             num_workers=int(getattr(args, "num_workers", 0)),
             pin_memory=torch.cuda.is_available(),
             )
+
+    @staticmethod
+    def _resolve_array_shape(args, side: str, num_beams: int) -> tuple:
+        """Return the ``(horizontal, vertical)`` array shape for one side.
+
+        ``0`` means "unspecified", so the shape is derived from the beam count.
+        """
+        horizontal = int(getattr(args, f"{side}_shape_h", 0))
+        vertical = int(getattr(args, f"{side}_shape_v", 0))
+
+        if horizontal <= 0 or vertical <= 0:
+            return square_array_shape(num_beams)
+
+        if horizontal * vertical != num_beams:
+            raise ValueError(
+                f"--{side}_shape_h x --{side}_shape_v = {horizontal}x{vertical} = "
+                f"{horizontal * vertical} beams, but the dataset expects {num_beams}."
+            )
+
+        return (horizontal, vertical)
 
     def save(self, iteration):
         point_cloud_path = os.path.join(self.model_path, f"point_cloud/iteration_{iteration}")
