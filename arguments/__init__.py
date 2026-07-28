@@ -51,7 +51,7 @@ class ModelParams(ParamGroup):
     """
 
     def __init__(self, parser: ArgumentParser, sentinel: bool = False):
-        self._source_path = "./dataset/asu_campus_16by64_outdoor"
+        self._source_path = "./dataset/asu_campus_16by64_lt"
         self._model_path = ""
         self.data_device = "cuda"
         self.eval = False

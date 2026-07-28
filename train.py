@@ -163,6 +163,10 @@ def evaluate_and_save_random_test_samples(
         ground_truth_map_numpy = ground_truth_numpy[output_index]
         predicted_map_numpy = predicted_numpy[output_index]
 
+        # if dataset is in power domain, convert to dB scale
+        # gt_db   = 10.0 * np.log10(ground_truth_map_numpy + 1e-12)
+        # pred_db = 10.0 * np.log10(np.clip(predicted_map_numpy, 0, None) + 1e-12)
+
         figure, axes = plt.subplots(
             2,
             1,
@@ -172,6 +176,9 @@ def evaluate_and_save_random_test_samples(
 
         # Ground-truth map
         ground_truth_image = axes[0].imshow(ground_truth_map_numpy,aspect="equal",interpolation="nearest")
+        
+        # use dB scale for ground truth (power dataset case)
+        # ground_truth_image = axes[0].imshow(gt_db, aspect="equal", interpolation="nearest",vmin=-50, vmax=0)
         axes[0].set_title("Ground Truth")
         axes[0].set_xlabel("")
         axes[0].set_ylabel("")
@@ -185,6 +192,9 @@ def evaluate_and_save_random_test_samples(
 
         # Predicted map
         predicted_image = axes[1].imshow(predicted_map_numpy,aspect="equal",interpolation="nearest")
+
+        # use dB scale for predicted (power dataset case)
+        # predicted_image = axes[1].imshow(pred_db, aspect="equal", interpolation="nearest",vmin=-50, vmax=0)
 
         axes[1].set_title("Predicted")
         axes[1].set_xlabel("")
