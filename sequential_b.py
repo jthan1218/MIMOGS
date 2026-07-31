@@ -153,12 +153,13 @@ def train_step(gaussians, scene, model_params, opt_params, tx_pos, batch, device
     return loss
 
 
-def build_gaussians(opt_params, device):
+def build_gaussians(opt_params, device, tie_covariance: bool = False):
     return GaussianModel(
         target_gaussians=25_000,
         optimizer_type=opt_params.optimizer_type,
         device=str(device),
         init_range=1,
+        tie_covariance=tie_covariance,
     )
 
 
@@ -181,7 +182,9 @@ def run(model_params, opt_params, args):
     # --------------------------------------------------
     # 1) Base GaussianModel + Scene (load dataset/metadata once)
     # --------------------------------------------------
-    base_gaussians = build_gaussians(opt_params, device)
+    tie_covariance = bool(int(getattr(model_params, "tie_covariance", 0)))
+
+    base_gaussians = build_gaussians(opt_params, device, tie_covariance)
     scene = Scene(model_params, base_gaussians)
 
     # 2) Initialize the base GaussianModel exactly like train.py.
@@ -274,7 +277,7 @@ def run(model_params, opt_params, args):
 
         # Fresh GaussianModel restored from the exact same initial state, with a
         # fresh optimizer configured for this ratio's total_iterations.
-        gaussians = build_gaussians(ratio_opt, device)
+        gaussians = build_gaussians(ratio_opt, device, tie_covariance)
         gaussians.restore(init_state, ratio_opt)
 
         print(f"[SequentialB] Training ratio {percent:03d}% with {k} / {full_train_size} samples "

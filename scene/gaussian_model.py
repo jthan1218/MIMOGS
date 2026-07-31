@@ -194,9 +194,15 @@ class GaussianModel:
     """MIMOGS Gaussian scene model
 
     Learnable attributes per Gaussian:
-    - mean                  : xyz
-    - covariance            : rotation + scaling
+    - mean                  : xyz      (rx side) + xyz_tx (tx side)
+    - covariance            : rotation + scaling      (rx side)
+                              rotation_tx + scaling_tx (tx side)
     - opacity-like weight   :opacity
+
+    A primitive is therefore a *pair* of 3D Gaussians -- one seen from the UE,
+    one seen from the BS -- tied together by the single shared per-primitive
+    gain.  Set ``tie_covariance=True`` to force the two ends to share one 3D
+    shape, which reproduces the earlier single-covariance model exactly.
     """
 
     def __init__(
@@ -205,16 +211,20 @@ class GaussianModel:
         optimizer_type: str = "default",
         device: str = "cuda",
         init_range: float = 5.0,
+        tie_covariance: bool = False,
     ):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.optimizer_type = optimizer_type
         self.target_gaussians = target_gaussians
         self.init_range = init_range
+        self.tie_covariance = bool(int(tie_covariance))
 
         self._xyz = torch.empty(0, device = self.device)
         self._xyz_tx = torch.empty(0, device = self.device)
         self._scaling = torch.empty(0, device = self.device)
         self._rotation = torch.empty(0, device = self.device)
+        self._scaling_tx = torch.empty(0, device = self.device)
+        self._rotation_tx = torch.empty(0, device = self.device)
         self._opacity = torch.empty(0, device = self.device)
         # self._gain_mag = torch.empty(0, device = self.device)
 
@@ -264,6 +274,18 @@ class GaussianModel:
         return self.rotation_activation(self._rotation)
 
     @property
+    def get_scaling_tx(self):
+        if self.tie_covariance:
+            return self.get_scaling
+        return self.scaling_activation(self._scaling_tx)
+
+    @property
+    def get_rotation_tx(self):
+        if self.tie_covariance:
+            return self.get_rotation
+        return self.rotation_activation(self._rotation_tx)
+
+    @property
     def get_opacity(self):
         return self.opacity_activation(self._opacity)
 
@@ -279,6 +301,31 @@ class GaussianModel:
         return self.covariance_activation(
             self.get_scaling, scaling_modifier, self.get_rotation, return_strip = False
         )
+
+    def get_covariance_tx(self, scaling_modifier: float = 1.0):
+        """Tx-side 3D covariance of every primitive.
+
+        Returns the Rx-side covariance when ``tie_covariance`` is set, so the
+        two projections then share one shape exactly as before.
+        """
+        if self.tie_covariance:
+            return self.get_covariance(scaling_modifier)
+        return self.covariance_activation(
+            self.get_scaling_tx, scaling_modifier, self.get_rotation_tx, return_strip = False
+        )
+
+    def _sync_tied_covariance(self):
+        """Alias the Tx-side covariance parameters onto the Rx-side ones.
+
+        Only used when ``tie_covariance`` is set.  The Tx parameters are then
+        not optimized (and not carried through the densification bookkeeping),
+        so aliasing keeps ``_scaling_tx`` / ``_rotation_tx`` consistent in both
+        value and shape with what the model actually renders.
+        """
+        if not self.tie_covariance:
+            return
+        self._scaling_tx = self._scaling
+        self._rotation_tx = self._rotation
 
     # ------------------------------------------------------------------
     # Init / save / restore
@@ -351,9 +398,15 @@ class GaussianModel:
         self._xyz_tx = nn.Parameter(fused_point_cloud.clone().requires_grad_(True))
         self._scaling = nn.Parameter(scales_raw.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
+        # The Tx side starts as an exact clone of the Rx side, so training starts
+        # from the tied behaviour and diverges only through the gradients each
+        # side receives from its own projection.
+        self._scaling_tx = nn.Parameter(scales_raw.detach().clone().requires_grad_(True))
+        self._rotation_tx = nn.Parameter(rots.detach().clone().requires_grad_(True))
         self._opacity = nn.Parameter(opacities_raw.requires_grad_(True))
         # self._gain_mag = nn.Parameter(gain_mag_raw.requires_grad_(True))
 
+        self._sync_tied_covariance()
         self._reset_statistics()
         print(f"[GaussianModel] Number of points at initialization: {n_points}")
 
@@ -378,6 +431,11 @@ class GaussianModel:
             # Appended at the end so legacy positional consumers (indices 0-2, 11, 13)
             # keep working. Old checkpoints without this entry restore via fallback below.
             self._xyz_tx.detach(),
+            # Same pattern for the decoupled Tx-side covariance. When tied these
+            # alias the Rx-side tensors (see _sync_tied_covariance), so a tied run
+            # reloads into an untied model with identical rendering behaviour.
+            self._scaling_tx.detach(),
+            self._rotation_tx.detach(),
         )
 
     def restore(self, model_args, training_args):
@@ -401,8 +459,29 @@ class GaussianModel:
             dynamic_gain_opt_dict,
         ) = model_args[:14]
 
-        # Backward-compat: pre-Tx-anchor checkpoints have len(model_args)==14.
-        xyz_tx = model_args[14] if len(model_args) >= 15 and model_args[14] is not None else None
+        # Backward-compat: pre-Tx-anchor checkpoints have len(model_args)==14,
+        # pre-Tx-covariance checkpoints have len(model_args)==15. The trailing
+        # slots are also where discontinued experiments parked their own extra
+        # tensors, so an entry is only accepted when it is a tensor of the shape
+        # this slot is supposed to hold; anything else falls back to the
+        # receive-side clone.
+        def _optional(index: int, like: torch.Tensor, label: str):
+            if len(model_args) < index + 1:
+                return None
+            value = model_args[index]
+            if value is None:
+                return None
+            if not torch.is_tensor(value) or tuple(value.shape) != tuple(like.shape):
+                print(
+                    f"[GaussianModel] Ignoring unexpected checkpoint entry at index "
+                    f"{index} for {label} (expected tensor of shape {tuple(like.shape)})"
+                )
+                return None
+            return value
+
+        xyz_tx = _optional(14, xyz, "xyz_tx")
+        scaling_tx = _optional(15, scaling, "scaling_tx")
+        rotation_tx = _optional(16, rotation, "rotation_tx")
 
         self._xyz = nn.Parameter(xyz.to(self.device).requires_grad_(True))
         self._scaling = nn.Parameter(scaling.to(self.device).requires_grad_(True))
@@ -415,6 +494,21 @@ class GaussianModel:
         else:
             self._xyz_tx = nn.Parameter(self._xyz.detach().clone().requires_grad_(True))
 
+        # Missing Tx-side covariance (older checkpoint) falls back to a clone of
+        # the Rx side, which is exactly the shared-covariance behaviour the
+        # checkpoint was trained with.
+        if scaling_tx is not None:
+            self._scaling_tx = nn.Parameter(scaling_tx.to(self.device).requires_grad_(True))
+        else:
+            self._scaling_tx = nn.Parameter(self._scaling.detach().clone().requires_grad_(True))
+
+        if rotation_tx is not None:
+            self._rotation_tx = nn.Parameter(rotation_tx.to(self.device).requires_grad_(True))
+        else:
+            self._rotation_tx = nn.Parameter(self._rotation.detach().clone().requires_grad_(True))
+
+        self._sync_tied_covariance()
+
         self.training_setup(training_args)
 
         self.xyz_gradient_accum = xyz_gradient_accum.to(self.device)
@@ -423,13 +517,57 @@ class GaussianModel:
         self.importance_denom = importance_denom.to(self.device)
         
         if opt_dict is not None:
-            self.optimizer.load_state_dict(opt_dict)
+            self._load_optimizer_state(opt_dict)
 
         if dynamic_gain_net_dict is not None:
             self.dynamic_gain_net.load_state_dict(dynamic_gain_net_dict)
 
         if dynamic_gain_opt_dict is not None and self.dynamic_gain_optimizer is not None:
             self.dynamic_gain_optimizer.load_state_dict(dynamic_gain_opt_dict)
+
+    def _load_optimizer_state(self, opt_dict: Dict[str, Any]):
+        """Load Adam state, tolerating a different set of parameter groups.
+
+        Checkpoints written before the Tx-side covariance (or before the Tx
+        anchor) contain fewer groups than the current optimizer, and a tied
+        model has fewer groups than an untied checkpoint.  Groups are therefore
+        matched by name; anything unmatched simply starts from a fresh state.
+        """
+        current = self.optimizer.state_dict()
+        saved_groups = opt_dict.get("param_groups", [])
+
+        if len(saved_groups) == len(current["param_groups"]):
+            self.optimizer.load_state_dict(opt_dict)
+            return
+
+        saved_state = opt_dict.get("state", {})
+        saved_by_name = {}
+        for saved_group in saved_groups:
+            name = saved_group.get("name", None)
+            params = saved_group.get("params", [])
+            if name is None or len(params) != 1:
+                continue
+            saved_by_name[name] = (saved_group, saved_state.get(params[0], None))
+
+        matched = []
+        for group in current["param_groups"]:
+            entry = saved_by_name.get(group.get("name", None), None)
+            if entry is None:
+                continue
+            saved_group, param_state = entry
+            for key, value in saved_group.items():
+                if key not in ("params", "name"):
+                    group[key] = value
+            if param_state is not None:
+                current["state"][group["params"][0]] = param_state
+            matched.append(group["name"])
+
+        self.optimizer.load_state_dict(current)
+        print(
+            "[GaussianModel] Optimizer state restored partially "
+            f"({len(saved_groups)} saved groups -> {len(current['param_groups'])} current); "
+            f"matched: {matched}"
+        )
 
     # ------------------------------------------------------------------
     # Optimizer
@@ -452,6 +590,14 @@ class GaussianModel:
             {"params": [self._rotation], "lr": training_args.rotation_lr, "name": "rotation"},
             # {"params": [self._gain_mag], "lr": training_args.gain_lr, "name": "gain_mag"},
         ]
+
+        # The Tx-side covariance reuses the Rx-side learning rates. When tied it
+        # is not optimized at all, so the optimizer is identical to before.
+        if not self.tie_covariance:
+            param_groups += [
+                {"params": [self._scaling_tx], "lr": training_args.scaling_lr, "name": "scaling_tx"},
+                {"params": [self._rotation_tx], "lr": training_args.rotation_lr, "name": "rotation_tx"},
+            ]
 
         if getattr(training_args, "optimizer_type", self.optimizer_type) == "adamw":
             self.optimizer = torch.optim.AdamW(param_groups, lr = 0.0, eps = 1e-8)
@@ -634,10 +780,14 @@ class GaussianModel:
             self.scaling_inverse_activation(torch.clamp(scale_t, min=1e-8)).requires_grad_(True)
         )
         self._rotation = nn.Parameter(rot_t.requires_grad_(True))
+        # PLY format carries only the rx covariance; tie the tx side to it on reload.
+        self._scaling_tx = nn.Parameter(self._scaling.detach().clone().requires_grad_(True))
+        self._rotation_tx = nn.Parameter(rot_t.clone().requires_grad_(True))
         # self._gain_mag = nn.Parameter(
         #     self.gain_mag_inverse_activation(torch.clamp(gain_mag_t, min=1e-8)).requires_grad_(True)
         # )
 
+        self._sync_tied_covariance()
         self._reset_statistics()
 
     # ------------------------------------------------------------------
@@ -730,6 +880,12 @@ class GaussianModel:
         self._rotation = optimizable_tensors["rotation"]
         # self._gain_mag = optimizable_tensors["gain_mag"]
 
+        if self.tie_covariance:
+            self._sync_tied_covariance()
+        else:
+            self._scaling_tx = optimizable_tensors["scaling_tx"]
+            self._rotation_tx = optimizable_tensors["rotation_tx"]
+
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
         self.grad_denom = self.grad_denom[valid_points_mask]
         self.importance_accum = self.importance_accum[valid_points_mask]
@@ -742,6 +898,8 @@ class GaussianModel:
         new_scaling: torch.Tensor,
         new_rotation: torch.Tensor,
         new_xyz_tx: torch.Tensor,
+        new_scaling_tx: Optional[torch.Tensor] = None,
+        new_rotation_tx: Optional[torch.Tensor] = None,
         # new_gain_mag: torch.Tensor,
     ):
         tensors_dict = {
@@ -753,6 +911,16 @@ class GaussianModel:
             # "gain_mag": new_gain_mag,
         }
 
+        if not self.tie_covariance:
+            # Callers that predate the decoupled covariance simply duplicate the
+            # rx-side shape onto the new tx-side entries.
+            tensors_dict["scaling_tx"] = (
+                new_scaling.clone() if new_scaling_tx is None else new_scaling_tx
+            )
+            tensors_dict["rotation_tx"] = (
+                new_rotation.clone() if new_rotation_tx is None else new_rotation_tx
+            )
+
         optimizable_tensors = self.cat_tensors_to_optimizer(tensors_dict)
 
         self._xyz = optimizable_tensors["xyz"]
@@ -762,7 +930,22 @@ class GaussianModel:
         self._rotation = optimizable_tensors["rotation"]
         # self._gain_mag = optimizable_tensors["gain_mag"]
 
+        if self.tie_covariance:
+            self._sync_tied_covariance()
+        else:
+            self._scaling_tx = optimizable_tensors["scaling_tx"]
+            self._rotation_tx = optimizable_tensors["rotation_tx"]
+
         self._reset_statistics()
+
+    def get_pair_scaling(self):
+        """Elementwise max of the rx- and tx-side scalings.
+
+        Densification and pruning decisions act on the primitive as a whole, so
+        the pair is described by the larger of the two extents on every axis.
+        Reduces to ``get_scaling`` when the covariance is tied.
+        """
+        return torch.maximum(self.get_scaling, self.get_scaling_tx)
 
     def densify_and_clone(
         self,
@@ -775,7 +958,7 @@ class GaussianModel:
         selected_pts_mask = (grads.squeeze(-1) >= grad_threshold)
         selected_pts_mask = torch.logical_and(
             selected_pts_mask,
-            self.get_scaling.max(dim=1).values <= clone_scale_threshold,
+            self.get_pair_scaling().max(dim=1).values <= clone_scale_threshold,
         )
 
         if importance_threshold > 0.0:
@@ -791,11 +974,16 @@ class GaussianModel:
         new_opacity = self._opacity[selected_pts_mask].clone()
         new_scaling = self._scaling[selected_pts_mask].clone()
         new_rotation = self._rotation[selected_pts_mask].clone()
+        # Both ends of the primitive are cloned together; the child is a full copy
+        # of the pair, never a mix of two different primitives.
+        new_scaling_tx = self._scaling_tx[selected_pts_mask].clone()
+        new_rotation_tx = self._rotation_tx[selected_pts_mask].clone()
         # new_gain_mag = self._gain_mag[selected_pts_mask].clone()
 
 
         self.densification_postfix(
-            new_xyz, new_opacity, new_scaling, new_rotation, new_xyz_tx
+            new_xyz, new_opacity, new_scaling, new_rotation, new_xyz_tx,
+            new_scaling_tx, new_rotation_tx,
         )
 
     def densify_and_split(
@@ -810,7 +998,7 @@ class GaussianModel:
         selected_pts_mask = (grads.squeeze(-1) >= grad_threshold)
         selected_pts_mask = torch.logical_and(
             selected_pts_mask,
-            self.get_scaling.max(dim=1).values > split_scale_threshold,
+            self.get_pair_scaling().max(dim=1).values > split_scale_threshold,
         )
         if importance_threshold > 0.0:
             selected_pts_mask = torch.logical_and(
@@ -832,10 +1020,6 @@ class GaussianModel:
         base_xyz = self.get_xyz[selected_pts_mask].repeat(n_splits, 1)
         offsets = torch.bmm(rot_mats, samples.unsqueeze(-1)).squeeze(-1)
         new_xyz = offsets + base_xyz
-        # Mirror the per-child offset on the Tx anchor so the (rx, tx) pair-relationship
-        # learned so far is preserved by each child.
-        base_xyz_tx = self._xyz_tx[selected_pts_mask].repeat(n_splits, 1)
-        new_xyz_tx = offsets + base_xyz_tx
 
         new_scaling = self.scaling_inverse_activation(
             torch.clamp(
@@ -847,8 +1031,38 @@ class GaussianModel:
         new_opacity = self._opacity[selected_pts_mask].repeat(n_splits, 1)
         # new_gain_mag = self._gain_mag[selected_pts_mask].repeat(n_splits, 1)
 
+        base_xyz_tx = self._xyz_tx[selected_pts_mask].repeat(n_splits, 1)
+
+        if self.tie_covariance:
+            # Mirror the per-child offset on the Tx anchor so the (rx, tx)
+            # pair-relationship learned so far is preserved by each child. No
+            # extra random numbers are drawn, so the tied path is bit-identical
+            # to the shared-covariance implementation.
+            new_xyz_tx = offsets + base_xyz_tx
+            new_scaling_tx = new_scaling
+            new_rotation_tx = new_rotation
+        else:
+            # The Tx anchor has its own covariance, so its child offsets are
+            # drawn from that covariance instead of being copied from the Rx
+            # side. Both children still belong to the same primitive pair.
+            stds_tx = self.get_scaling_tx[selected_pts_mask].repeat(n_splits, 1)
+            samples_tx = torch.normal(mean=means, std=stds_tx)
+            rots_tx = self.get_rotation_tx[selected_pts_mask].repeat(n_splits, 1)
+            rot_mats_tx = build_rotation(rots_tx)
+            offsets_tx = torch.bmm(rot_mats_tx, samples_tx.unsqueeze(-1)).squeeze(-1)
+            new_xyz_tx = offsets_tx + base_xyz_tx
+
+            new_scaling_tx = self.scaling_inverse_activation(
+                torch.clamp(
+                    self.get_scaling_tx[selected_pts_mask].repeat(n_splits, 1) / (0.8 * n_splits),
+                    min=1e-8,
+                )
+            )
+            new_rotation_tx = self.get_rotation_tx[selected_pts_mask].repeat(n_splits, 1)
+
         self.densification_postfix(
-            new_xyz, new_opacity, new_scaling, new_rotation, new_xyz_tx
+            new_xyz, new_opacity, new_scaling, new_rotation, new_xyz_tx,
+            new_scaling_tx, new_rotation_tx,
         )
 
         prune_filter = torch.cat(
@@ -895,7 +1109,7 @@ class GaussianModel:
 
         if max_scale is not None:
             prune_mask = torch.logical_or(
-                prune_mask, self.get_scaling.max(dim=1).values > max_scale
+                prune_mask, self.get_pair_scaling().max(dim=1).values > max_scale
             )
 
         self.prune_points(prune_mask)

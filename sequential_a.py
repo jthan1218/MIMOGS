@@ -168,6 +168,7 @@ def run(model_params, opt_params, args):
         optimizer_type=opt_params.optimizer_type,
         device=str(device),
         init_range=1,
+        tie_covariance=bool(int(getattr(model_params, "tie_covariance", 0))),
     )
 
     scene = Scene(model_params, gaussians)

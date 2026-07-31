@@ -163,7 +163,7 @@ def load_model(ckpt_path: str = DEFAULT_CKPT, device: Optional[str] = None) -> L
     gaussians.restore(ckpt["gaussians"], opt_params)
 
     # Freeze: this is an eval-only pipeline.
-    for attr in ("_xyz", "_xyz_tx", "_scaling", "_rotation", "_opacity"):
+    for attr in ("_xyz", "_xyz_tx", "_scaling", "_rotation", "_scaling_tx", "_rotation_tx", "_opacity"):
         p = getattr(gaussians, attr, None)
         if isinstance(p, torch.Tensor):
             p.requires_grad_(False)

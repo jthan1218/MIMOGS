@@ -248,6 +248,7 @@ def training(args):
         optimizer_type=getattr(opt_params, "optimizer_type", "default"),
         device=str(device),
         init_range=getattr(opt_params, "init_range", 1),
+        tie_covariance=bool(int(getattr(model_params, "tie_covariance", 0))),
     )
     scene = Scene(model_params, gaussians)
 

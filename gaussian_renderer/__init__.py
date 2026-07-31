@@ -397,21 +397,25 @@ def render(
     # ------------------------------------------------------------------
     # Covariance-aware soft projection to Tx beam-domain
     #
-    # The transmit side uses an independent 3D anchor (pc.get_xyz_tx) so the
-    # tx-beam direction can be set by a different interaction point than the
-    # rx-beam direction. This is what gives the model the degrees of freedom
-    # to represent multi-bounce paths. When _xyz_tx == _xyz (tied init or
-    # strong anchor regularization), behaviour collapses back to the original
-    # single-anchor render.
+    # The transmit side is a 3D Gaussian of its own: it has an independent
+    # anchor (pc.get_xyz_tx) and an independent covariance
+    # (pc.get_covariance_tx), so the tx-beam direction and angular spread can
+    # be set by a different interaction point than the rx-beam ones. A
+    # primitive is therefore a pair of 3D Gaussians -- the last-bounce end seen
+    # by the UE and the first-bounce end seen by the BS -- which for a
+    # multi-bounce path are different physical objects. The two sides are tied
+    # only through the shared per-primitive gain, which is what keeps them one
+    # effective propagation component instead of two independent marginals.
     #
-    # TODO(multi-bounce): plug in a separate `pc.get_covariance_tx()` here once
-    # decoupled covariance is implemented. For now both projections share the
-    # same per-Gaussian covariance.
+    # When the tx parameters equal the rx ones (tied init, tie_covariance=1, or
+    # strong anchor regularization), behaviour collapses back to the original
+    # single-anchor / single-covariance render.
     # ------------------------------------------------------------------
     means_tx = pc.get_xyz_tx
+    covariances_tx = pc.get_covariance_tx()
     tx_uv_mean, tx_cov00, tx_cov01, tx_cov11, _ = _projected_angular_covariance(
         means=means_tx,
-        covariances=covariances,
+        covariances=covariances_tx,
         array_pos = tx_pos,
         covariance_floor = covariance_floor,
     )

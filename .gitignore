@@ -7,3 +7,5 @@ dataset/*
 *.pyd
 
 deepmimo_scenarios/
+
+analysis/

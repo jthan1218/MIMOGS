@@ -191,9 +191,11 @@ def render_fast(
     )
 
     # The BS and Tx-side anchors are fixed, so this is evaluated only once for
-    # the entire query batch.
+    # the entire query batch. The Tx side carries its own 3D covariance, so the
+    # resulting tx_precision below is distinct from rx_precision; the two ends
+    # of a primitive are tied only through the shared gain.
     tx_uv_b, tx_precision_b = _projected_angular_covariance_batched(
-        pc.get_xyz_tx, covariances, tx_batch, covariance_floor
+        pc.get_xyz_tx, pc.get_covariance_tx(), tx_batch, covariance_floor
     )
     tx_uv = tx_uv_b.squeeze(0).contiguous()
     tx_precision = tx_precision_b.squeeze(0).contiguous()

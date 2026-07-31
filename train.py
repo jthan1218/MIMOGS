@@ -334,7 +334,7 @@ def training(
 
     save_args(model_params.model_path,model_params,opt_params,raw_args)
 
-    gaussians = GaussianModel(target_gaussians=int(getattr(model_params, "target_gaussians", 25_000)),optimizer_type=opt_params.optimizer_type,device=str(device),init_range=1.0)
+    gaussians = GaussianModel(target_gaussians=int(getattr(model_params, "target_gaussians", 25_000)),optimizer_type=opt_params.optimizer_type,device=str(device),init_range=1.0,tie_covariance=bool(int(getattr(model_params, "tie_covariance", 0))))
 
     scene = Scene(model_params,gaussians)
 

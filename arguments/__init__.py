@@ -51,7 +51,7 @@ class ModelParams(ParamGroup):
     """
 
     def __init__(self, parser: ArgumentParser, sentinel: bool = False):
-        self._source_path = "./dataset/asu_campus_16by64_lt"
+        self._source_path = "./dataset/asu_campus_16by64_outdoor"
         self._model_path = ""
         self.data_device = "cuda"
         self.eval = False
@@ -74,10 +74,17 @@ class ModelParams(ParamGroup):
         # so both 0 and 1 can be supplied through the existing ParamGroup.
         self.batch_size = 8
         self.num_workers = 0
-        self.num_epochs = 30
+        self.num_epochs = 10
         self.target_gaussians = 25_000
         self.use_cuda_rasterizer = 1
         self.use_amp = 0
+
+        # Tie the Tx-side 3D covariance to the Rx-side one. With 1 the two
+        # anchors share a single (scaling, rotation) pair, which reproduces the
+        # previous shared-covariance behaviour exactly. With 0 each anchor
+        # carries its own covariance and the two ends of a primitive are tied
+        # only through the shared per-primitive gain.
+        self.tie_covariance = 0
 
         super().__init__(parser, "Model Parameters", sentinel)
 
@@ -119,7 +126,7 @@ class OptimizationParams(ParamGroup):
         # model behaves as a single-anchor (LoS / single-bounce) renderer;
         # the optimizer is free to separate the two anchors where the data
         # demands it (multi-bounce paths).
-        self.lambda_anchor = 0.01
+        self.lambda_anchor = 0
 
         super().__init__(parser, "Optimization Parameters")
 
