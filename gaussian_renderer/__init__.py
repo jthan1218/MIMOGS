@@ -377,6 +377,8 @@ def render(
     # _assert_finite_local("rx_uv_mean", rx_uv_mean)
     # _assert_finite_local("rx_cov_uv", rx_cov_uv)
 
+    rx_uv_mean = - rx_uv_mean
+
 
     rx_weights = _gaussian_beam_weights_from_uv(
     uv_mean=rx_uv_mean,

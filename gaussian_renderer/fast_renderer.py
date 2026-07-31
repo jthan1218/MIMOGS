@@ -190,6 +190,8 @@ def render_fast(
         means_rx, covariances, rx_batch, covariance_floor
     )
 
+    rx_uv = - rx_uv
+
     # The BS and Tx-side anchors are fixed, so this is evaluated only once for
     # the entire query batch. The Tx side carries its own 3D covariance, so the
     # resulting tx_precision below is distinct from rx_precision; the two ends
