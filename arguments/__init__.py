@@ -100,7 +100,7 @@ class ModelParams(ParamGroup):
 
 class OptimizationParams(ParamGroup):
     def __init__(self, parser: ArgumentParser):
-        self.iterations = 200_000
+        self.iterations = 0
         self.position_lr_init = 0.003
         self.position_lr_final = 0.000016
         self.position_lr_delay_mult = 0.01

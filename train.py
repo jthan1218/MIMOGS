@@ -347,7 +347,11 @@ def training(
 
     total_iterations = len(scene.train_iter)* scene.num_epochs
 
-    opt_params.position_lr_max_steps = max(1,int(0.6 * total_iterations))
+    if opt_params.iterations <= 0:
+        opt_params.iterations = total_iterations
+
+    if opt_params.position_lr_max_steps <= 0:
+        opt_params.position_lr_max_steps = max(1,int(0.6 * total_iterations))
 
     gaussians.training_setup(opt_params)
 
