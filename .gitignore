@@ -8,4 +8,6 @@ dataset/*
 
 deepmimo_scenarios/
 
+analysis/mimogs_rasterizer/build/
+
 analysis/

@@ -3,6 +3,7 @@ from typing import Dict, Tuple, Optional
 
 import torch
 
+from mimogs_rasterizer.reference import wrap_beam_delta
 from scene.gaussian_model import GaussianModel
 
 
@@ -226,8 +227,12 @@ def _gaussian_beam_weights_from_uv(
 ) -> torch.Tensor:
     inv00, inv01, inv11 = _safe_inv_cov_2x2(cov00, cov01, cov11, eig_floor=eig_floor)
 
-    dx = beam_centers_uv[:, 0].unsqueeze(0) - uv_mean[:, 0].unsqueeze(1)
-    dy = beam_centers_uv[:, 1].unsqueeze(0) - uv_mean[:, 1].unsqueeze(1)
+    # Wrapped modulo 2 -- see mimogs_rasterizer.reference.wrap_beam_delta.  The
+    # array response is periodic in (u - b) with period 2, so the raw
+    # difference mis-measures the distance near the grid edge and the resulting
+    # weights (and the top-k truncation that reads them) pick the wrong beam.
+    dx = wrap_beam_delta(beam_centers_uv[:, 0].unsqueeze(0) - uv_mean[:, 0].unsqueeze(1))
+    dy = wrap_beam_delta(beam_centers_uv[:, 1].unsqueeze(0) - uv_mean[:, 1].unsqueeze(1))
 
     inv00 = inv00.unsqueeze(1)
     inv01 = inv01.unsqueeze(1)

@@ -1,5 +1,0 @@
-# ninja log v7
-0	7616	1783920235625543145	/home/HJT/MIMOGS_fast/mimogs_rasterizer/build/temp.linux-x86_64-cpython-310/home/HJT/MIMOGS_fast/mimogs_rasterizer/csrc/bindings.o	e05a1bf80b583fea
-0	24534	1783920235626234965	/home/HJT/MIMOGS_fast/mimogs_rasterizer/build/temp.linux-x86_64-cpython-310/home/HJT/MIMOGS_fast/mimogs_rasterizer/csrc/rasterizer_cuda.o	dc5b15df2a5aa039
-1	7780	1784176084372088285	/home/HJT/MIMOGS3/mimogs_rasterizer/build/temp.linux-x86_64-cpython-310/home/HJT/MIMOGS3/mimogs_rasterizer/csrc/bindings.o	bcb514fb24d16ece
-1	25038	1784176084373690702	/home/HJT/MIMOGS3/mimogs_rasterizer/build/temp.linux-x86_64-cpython-310/home/HJT/MIMOGS3/mimogs_rasterizer/csrc/rasterizer_cuda.o	7d545cea2be37e2a

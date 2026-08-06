@@ -11,6 +11,22 @@ from typing import Tuple
 import torch
 
 
+def wrap_beam_delta(delta: torch.Tensor) -> torch.Tensor:
+    """Wrap a beam-coordinate difference into ``[-1, 1)``.
+
+    Beam centres live on ``2 * fftfreq(N)`` and the array response phase is
+    ``exp(j*pi*k*(u - b))``, which is periodic in ``u - b`` with period 2.  The
+    raw difference therefore over-states the distance for coordinates near the
+    grid edge: with ``N=4`` a mean at ``u = 0.9`` is 1.9 away from the bin at
+    ``-1.0`` under the raw metric but only 0.1 away under the true one, so the
+    unwrapped renderer picks the wrong beam.
+
+    The map is piecewise identity with unit slope, so gradients are unchanged
+    away from the (measure-zero) branch cut.
+    """
+    return torch.remainder(delta + 1.0, 2.0) - 1.0
+
+
 def topk_gaussian_beam_weights(
     uv_mean: torch.Tensor,
     precision: torch.Tensor,
@@ -53,8 +69,10 @@ def topk_gaussian_beam_weights(
     if k_eff <= 0:
         raise ValueError(f"k must be positive, got {k}")
 
-    dx = beam_centers_uv[:, 0] - uv_mean[..., 0, None]
-    dy = beam_centers_uv[:, 1] - uv_mean[..., 1, None]
+    # Wrapped modulo 2: this feeds both the weight exponent and, through the
+    # logits, the top-k candidate selection below.
+    dx = wrap_beam_delta(beam_centers_uv[:, 0] - uv_mean[..., 0, None])
+    dy = wrap_beam_delta(beam_centers_uv[:, 1] - uv_mean[..., 1, None])
 
     p00 = precision[..., 0, None]
     p01 = precision[..., 1, None]

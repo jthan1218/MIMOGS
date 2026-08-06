@@ -12,6 +12,16 @@ namespace {
 constexpr int kThreads = 256;
 constexpr int kMaxTopK = 8;
 
+// Wrap a beam-coordinate difference into [-1, 1).  Beam centres live on
+// 2*fftfreq(N) and the array response phase exp(j*pi*k*(u-b)) is periodic in
+// (u-b) with period 2, so the raw difference over-states the distance near the
+// grid edge and the top-k selection picks the wrong beam there.  The map is
+// piecewise identity with unit slope, so the backward formulas are unchanged
+// apart from using the wrapped deltas.
+__device__ __forceinline__ float wrap_beam_delta(float d) {
+  return d - 2.0f * rintf(0.5f * d);
+}
+
 // Stable softmax over the k selected raw logits stored in `values`.  The
 // maximum selected logit is shifted to zero, so the strongest beam always
 // keeps weight exp(0)=1 and the normalized weights sum to one; the optional
@@ -92,8 +102,8 @@ __global__ void topk_tx_kernel(
   // Selection uses the raw logits so the beam ordering is never destroyed by
   // clamping; normalization afterwards is a stable softmax over the winners.
   for (int b = 0; b < n_beams; ++b) {
-    const float dx = centers[2 * b + 0] - ux;
-    const float dy = centers[2 * b + 1] - uy;
+    const float dx = wrap_beam_delta(centers[2 * b + 0] - ux);
+    const float dy = wrap_beam_delta(centers[2 * b + 1] - uy);
     const float mahal = p00 * dx * dx + 2.0f * p01 * dx * dy + p11 * dy * dy;
     insert_topk(-0.5f * mahal, b, top_values, top_indices, k);
   }
@@ -140,8 +150,8 @@ __global__ void topk_rx_kernel(
   // Selection uses the raw logits so the beam ordering is never destroyed by
   // clamping; normalization afterwards is a stable softmax over the winners.
   for (int b = 0; b < n_beams; ++b) {
-    const float dx = centers[2 * b + 0] - ux;
-    const float dy = centers[2 * b + 1] - uy;
+    const float dx = wrap_beam_delta(centers[2 * b + 0] - ux);
+    const float dy = wrap_beam_delta(centers[2 * b + 1] - uy);
     const float mahal = p00 * dx * dx + 2.0f * p01 * dx * dy + p11 * dy * dy;
     insert_topk(-0.5f * mahal, b, top_values, top_indices, k);
   }
@@ -315,8 +325,8 @@ __global__ void backward_rx_gain_kernel(
     if (i >= k_rx) break;
     const float w = rx_weights[linear * k_rx + i];
     const int ri = rx_indices[linear * k_rx + i];
-    const float dx = rx_centers[2 * ri + 0] - ux;
-    const float dy = rx_centers[2 * ri + 1] - uy;
+    const float dx = wrap_beam_delta(rx_centers[2 * ri + 0] - ux);
+    const float dy = wrap_beam_delta(rx_centers[2 * ri + 1] - uy);
     // Exact softmax Jacobian; weights zeroed by the floor give dlogit = 0.
     const float dlogit = w * (grad_w[i] - weighted_grad);
 
@@ -397,8 +407,8 @@ __global__ void backward_tx_kernel(
       if (j >= k_tx) break;
       const float w = tx_weights[n * k_tx + j];
       const int tj = tx_indices[n * k_tx + j];
-      const float dx = tx_centers[2 * tj + 0] - ux;
-      const float dy = tx_centers[2 * tj + 1] - uy;
+      const float dx = wrap_beam_delta(tx_centers[2 * tj + 0] - ux);
+      const float dy = wrap_beam_delta(tx_centers[2 * tj + 1] - uy);
       // Exact softmax Jacobian; weights zeroed by the floor give dlogit = 0.
       const float dlogit = w * (grad_w[j] - weighted_grad);
 
