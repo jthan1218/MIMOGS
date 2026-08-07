@@ -11,3 +11,5 @@ deepmimo_scenarios/
 mimogs_rasterizer/build/
 
 analysis/
+
+tests/
