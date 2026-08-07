@@ -2,6 +2,9 @@ outputs/
 dataset/*
 
 **/__pycache__/
+**/.pytest_cache/
+**/.claude/
+
 *.pyc
 *.pyo
 *.pyd
@@ -11,3 +14,5 @@ deepmimo_scenarios/
 mimogs_rasterizer/build/
 
 analysis/
+
+tests/

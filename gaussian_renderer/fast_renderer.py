@@ -16,6 +16,12 @@ from typing import Dict, Tuple
 
 import torch
 
+from gaussian_renderer import (
+    MEASURED_BEAM_AZ_DEG,
+    MEASURED_BEAM_EL_DEG,
+    _build_custom_uv_grid,
+    parse_angle_list,
+)
 from mimogs_rasterizer import beam_splat
 from scene.gaussian_model import GaussianModel
 
@@ -167,6 +173,9 @@ def render_fast(
     max_active_rx_beams: int = 2,
     max_active_tx_beams: int = 2,
     use_cuda_rasterizer: bool = True,
+    beam_grid_mode: str = "dft",
+    beam_az_deg=None,
+    beam_el_deg=None,
 ) -> Dict[str, torch.Tensor]:
     """Render one or more UE locations.
 
@@ -202,12 +211,27 @@ def render_fast(
     tx_uv = tx_uv_b.squeeze(0).contiguous()
     tx_precision = tx_precision_b.squeeze(0).contiguous()
 
-    rx_centers = _build_beam_uv_grid(
-        rx_shape[0], rx_shape[1], device=device, dtype=dtype
-    )
-    tx_centers = _build_beam_uv_grid(
-        tx_shape[0], tx_shape[1], device=device, dtype=dtype
-    )
+    # "custom_angles" replaces the DFT bins with a measured analog steering
+    # codebook.  rx_shape/tx_shape are unused there (the beam count is
+    # len(az)*len(el)) and the centres are non-periodic, so beam-delta
+    # wrapping is switched off through ``periodic`` below.
+    mode = str(beam_grid_mode).lower()
+    if mode not in ("dft", "custom_angles"):
+        raise ValueError(f"beam_grid_mode must be 'dft' or 'custom_angles', got {beam_grid_mode!r}")
+    periodic_beams = mode == "dft"
+
+    if periodic_beams:
+        rx_centers = _build_beam_uv_grid(
+            rx_shape[0], rx_shape[1], device=device, dtype=dtype
+        )
+        tx_centers = _build_beam_uv_grid(
+            tx_shape[0], tx_shape[1], device=device, dtype=dtype
+        )
+    else:
+        az = parse_angle_list(beam_az_deg, MEASURED_BEAM_AZ_DEG)
+        el = parse_angle_list(beam_el_deg, MEASURED_BEAM_EL_DEG)
+        rx_centers = _build_custom_uv_grid(az, el, device=device, dtype=dtype)
+        tx_centers = rx_centers
 
     output = beam_splat(
         rx_uv=rx_uv,
@@ -221,6 +245,7 @@ def render_fast(
         k_tx=min(int(max_active_tx_beams), int(tx_centers.shape[0])),
         weight_floor=float(weight_floor),
         use_cuda_extension=bool(use_cuda_rasterizer),
+        periodic=periodic_beams,
     )
 
     # Because retained Rx/Tx weights are normalized per Gaussian, the total

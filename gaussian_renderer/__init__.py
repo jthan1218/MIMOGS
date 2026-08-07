@@ -62,6 +62,93 @@ def _build_beam_uv_grid(
     return centers_uv
 
 
+# ----------------------------------------------------------------------
+# Custom (measured) analog steering codebook
+#
+# The measured 60 GHz indoor set uses 63 analog beams per side, laid out as
+# 21 azimuth x 3 elevation with AZIMUTH-FASTEST ordering inside each
+# elevation block:
+#     index   0.. 20 -> el = +18 deg, az sweeping -54 .. +54
+#     index  21.. 41 -> el =   0 deg, az sweeping -54 .. +54
+#     index  42.. 62 -> el = -18 deg, az sweeping -54 .. +54
+# ----------------------------------------------------------------------
+MEASURED_BEAM_AZ_DEG = tuple(round(-54.0 + 5.4 * i, 6) for i in range(21))
+MEASURED_BEAM_EL_DEG = (18.0, 0.0, -18.0)
+
+
+def parse_angle_list(spec, default) -> Tuple[float, ...]:
+    """Parse a comma-separated degree list; an empty/None spec gives ``default``."""
+    if spec is None:
+        return tuple(float(a) for a in default)
+    if not isinstance(spec, str):
+        return tuple(float(a) for a in spec)
+
+    entries = [chunk.strip() for chunk in spec.split(",")]
+    entries = [chunk for chunk in entries if chunk]
+    if not entries:
+        return tuple(float(a) for a in default)
+    return tuple(float(chunk) for chunk in entries)
+
+
+_CUSTOM_BEAM_UV_GRID_CACHE = {}
+
+
+def _build_custom_uv_grid(
+    az_deg,
+    el_deg,
+    device,
+    dtype,
+) -> torch.Tensor:
+    """Beam centers for a measured analog steering codebook.
+
+    The centers must live in the same direction-cosine space as
+    ``_uv_from_unit_direction``: panel on the y-z plane, boresight +x,
+    horizontal +y, vertical +z.  For an azimuth ``az`` (about +z, from the +x
+    boresight toward +y) and an elevation ``el`` (up toward +z),
+
+        d = [cos(el) cos(az), cos(el) sin(az), sin(el)]
+
+    so the direction cosines used by the renderer are
+
+        u = d_y = cos(el) * sin(az)
+        v = d_z = sin(el)
+
+    THIS IS THE ONE PLACE TO ADJUST if a LoS sanity check shows the mapping is
+    flipped: the fix is a sign on u/v here, or swapping the roles of az and el
+    -- nothing downstream encodes the angle convention.
+
+    Beams are emitted azimuth-fastest (elevation outer, azimuth inner) so the
+    row order matches the dataset's beam indexing.
+
+    Returns:
+        (len(el) * len(az), 2) beam centers in (u, v).
+    """
+    az_deg = tuple(float(a) for a in az_deg)
+    el_deg = tuple(float(e) for e in el_deg)
+    if not az_deg or not el_deg:
+        raise ValueError("custom beam grid needs at least one azimuth and one elevation")
+
+    key = (az_deg, el_deg, str(device), str(dtype))
+    cached = _CUSTOM_BEAM_UV_GRID_CACHE.get(key, None)
+    if cached is not None:
+        return cached
+
+    # Build in float64 and cast once, so the grid does not depend on the
+    # renderer dtype beyond the final rounding.
+    deg2rad = math.pi / 180.0
+    az = torch.tensor(az_deg, device=device, dtype=torch.float64) * deg2rad
+    el = torch.tensor(el_deg, device=device, dtype=torch.float64) * deg2rad
+
+    # (num_el, num_az) -> flattened azimuth-fastest.
+    u = torch.cos(el).unsqueeze(1) * torch.sin(az).unsqueeze(0)
+    v = torch.sin(el).unsqueeze(1).expand_as(u)
+
+    centers_uv = torch.stack([u.reshape(-1), v.reshape(-1)], dim=-1).to(dtype).contiguous()
+    _CUSTOM_BEAM_UV_GRID_CACHE[key] = centers_uv
+
+    return centers_uv
+
+
 def _direction_and_distance(
     points: torch.Tensor, # (N,3)
     array_pos: torch.Tensor # (3,)
@@ -224,6 +311,7 @@ def _gaussian_beam_weights_from_uv(
     normalize: bool = True,
     weight_floor: float = 0.0,
     eig_floor: float = 1e-4,
+    periodic: bool = True,
 ) -> torch.Tensor:
     inv00, inv01, inv11 = _safe_inv_cov_2x2(cov00, cov01, cov11, eig_floor=eig_floor)
 
@@ -231,8 +319,15 @@ def _gaussian_beam_weights_from_uv(
     # array response is periodic in (u - b) with period 2, so the raw
     # difference mis-measures the distance near the grid edge and the resulting
     # weights (and the top-k truncation that reads them) pick the wrong beam.
-    dx = wrap_beam_delta(beam_centers_uv[:, 0].unsqueeze(0) - uv_mean[:, 0].unsqueeze(1))
-    dy = wrap_beam_delta(beam_centers_uv[:, 1].unsqueeze(0) - uv_mean[:, 1].unsqueeze(1))
+    #
+    # A measured analog codebook is NOT a DFT grid: its centers are bounded
+    # steering directions with no period-2 structure, so wrapping there would
+    # fold genuinely distant beams onto each other.  periodic=False keeps the
+    # raw difference for that path.
+    delta_x = beam_centers_uv[:, 0].unsqueeze(0) - uv_mean[:, 0].unsqueeze(1)
+    delta_y = beam_centers_uv[:, 1].unsqueeze(0) - uv_mean[:, 1].unsqueeze(1)
+    dx = wrap_beam_delta(delta_x) if periodic else delta_x
+    dy = wrap_beam_delta(delta_y) if periodic else delta_y
 
     inv00 = inv00.unsqueeze(1)
     inv01 = inv01.unsqueeze(1)
@@ -307,6 +402,9 @@ def render(
     max_active_rx_beams: int = 2,
     max_active_tx_beams: int = 2,
     renormalize_local_beam_weights: bool = True,
+    beam_grid_mode: str = "dft",
+    beam_az_deg=None,
+    beam_el_deg=None,
 ) -> Dict[str, torch.Tensor]:
     """
     MIMOGS beamspace renderer.
@@ -354,20 +452,38 @@ def render(
 
     # ------------------------------------------------------------------
     # Build beam centers in uv-domain
+    #
+    # "custom_angles" ignores rx_shape/tx_shape entirely: the beam count is
+    # len(az) * len(el), which need not factor into a (horizontal, vertical)
+    # UPA at all (the measured codebook is 21 x 3 = 63 beams).  Its centers
+    # are also non-periodic, so beam-delta wrapping is disabled below.
     # ------------------------------------------------------------------
-    rx_beam_centers_uv = _build_beam_uv_grid(
-        horizontal = rx_shape[0],
-        vertical = rx_shape[1],
-        device = means.device,
-        dtype = means.dtype,
-    )
+    mode = str(beam_grid_mode).lower()
+    if mode not in ("dft", "custom_angles"):
+        raise ValueError(f"beam_grid_mode must be 'dft' or 'custom_angles', got {beam_grid_mode!r}")
+    periodic_beams = mode == "dft"
 
-    tx_beam_centers_uv = _build_beam_uv_grid(
-        horizontal = tx_shape[0],
-        vertical = tx_shape[1],
-        device = means.device,
-        dtype = means.dtype,
-    )
+    if periodic_beams:
+        rx_beam_centers_uv = _build_beam_uv_grid(
+            horizontal = rx_shape[0],
+            vertical = rx_shape[1],
+            device = means.device,
+            dtype = means.dtype,
+        )
+
+        tx_beam_centers_uv = _build_beam_uv_grid(
+            horizontal = tx_shape[0],
+            vertical = tx_shape[1],
+            device = means.device,
+            dtype = means.dtype,
+        )
+    else:
+        az = parse_angle_list(beam_az_deg, MEASURED_BEAM_AZ_DEG)
+        el = parse_angle_list(beam_el_deg, MEASURED_BEAM_EL_DEG)
+        rx_beam_centers_uv = _build_custom_uv_grid(
+            az, el, device = means.device, dtype = means.dtype
+        )
+        tx_beam_centers_uv = rx_beam_centers_uv
 
     # ------------------------------------------------------------------
     # Covariance-aware soft projection to Rx beam-domain
@@ -394,6 +510,7 @@ def render(
     normalize=normalize_beam_weights,
     weight_floor=weight_floor,
     eig_floor=max(covariance_floor, 1e-4),
+    periodic=periodic_beams,
     )
     rx_weights = _truncate_to_local_topk(
         rx_weights,
@@ -435,6 +552,7 @@ def render(
         normalize=normalize_beam_weights,
         weight_floor=weight_floor,
         eig_floor=max(covariance_floor, 1e-4),
+        periodic=periodic_beams,
     )
     tx_weights = _truncate_to_local_topk(
         tx_weights,

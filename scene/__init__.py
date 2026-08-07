@@ -131,10 +131,42 @@ class Scene:
         self.beam_rows = int(magnitude_shape[1])
         self.beam_cols = int(magnitude_shape[2])
 
-        # Array shapes default to the square factorization of the beam counts.
-        # Non-square UPAs are declared explicitly through the override args.
-        self.rx_shape = self._resolve_array_shape(args, "rx", self.beam_rows)
-        self.tx_shape = self._resolve_array_shape(args, "tx", self.beam_cols)
+        # Beam grid.  "dft" derives the beam centers from the array shape, so
+        # the shape must factor the beam count.  "custom_angles" reads the
+        # centers from a measured steering codebook instead: the beam count is
+        # len(az) * len(el), which need not be a UPA factorization at all, so
+        # that path skips the shape resolution entirely.
+        #
+        # Imported here rather than at module scope: gaussian_renderer imports
+        # scene.gaussian_model, so a top-level import would be circular.
+        from gaussian_renderer import (
+            MEASURED_BEAM_AZ_DEG,
+            MEASURED_BEAM_EL_DEG,
+            parse_angle_list,
+        )
+
+        self.beam_grid_mode = str(getattr(args, "beam_grid_mode", "dft") or "dft").lower()
+        self.beam_az_deg = parse_angle_list(getattr(args, "beam_az_deg", ""), MEASURED_BEAM_AZ_DEG)
+        self.beam_el_deg = parse_angle_list(getattr(args, "beam_el_deg", ""), MEASURED_BEAM_EL_DEG)
+
+        if self.beam_grid_mode == "custom_angles":
+            num_custom_beams = len(self.beam_az_deg) * len(self.beam_el_deg)
+            for side, num_beams in (("rx", self.beam_rows), ("tx", self.beam_cols)):
+                if num_custom_beams != num_beams:
+                    raise ValueError(
+                        f"beam_grid_mode=custom_angles gives {len(self.beam_az_deg)} x "
+                        f"{len(self.beam_el_deg)} = {num_custom_beams} beams, but the dataset "
+                        f"expects {num_beams} on the {side} side."
+                    )
+            # Descriptive only on this path: the renderer builds its centers
+            # from the angle lists and never reads these.
+            self.rx_shape = (len(self.beam_az_deg), len(self.beam_el_deg))
+            self.tx_shape = self.rx_shape
+        else:
+            # Array shapes default to the square factorization of the beam
+            # counts.  Non-square UPAs are declared through the override args.
+            self.rx_shape = self._resolve_array_shape(args, "rx", self.beam_rows)
+            self.tx_shape = self._resolve_array_shape(args, "tx", self.beam_cols)
 
         self.train_iter = DataLoader(
             self.train_set,

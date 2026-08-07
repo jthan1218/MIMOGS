@@ -119,6 +119,9 @@ def evaluate_and_save_random_test_samples(
                 max_active_rx_beams=int(getattr(model_params, "max_active_rx_beams", 2)),
                 max_active_tx_beams=int(getattr(model_params, "max_active_tx_beams", 2)),
                 use_cuda_rasterizer=bool(int(getattr(model_params, "use_cuda_rasterizer", 1))),
+                beam_grid_mode=scene.beam_grid_mode,
+                beam_az_deg=scene.beam_az_deg,
+                beam_el_deg=scene.beam_el_deg,
             )
 
             predicted_chunk = rendered_output["render"]
@@ -269,6 +272,9 @@ def evaluate_full_test_quality(
                 max_active_rx_beams=int(getattr(model_params, "max_active_rx_beams", 2)),
                 max_active_tx_beams=int(getattr(model_params, "max_active_tx_beams", 2)),
                 use_cuda_rasterizer=bool(int(getattr(model_params, "use_cuda_rasterizer", 1))),
+                beam_grid_mode=scene.beam_grid_mode,
+                beam_az_deg=scene.beam_az_deg,
+                beam_el_deg=scene.beam_el_deg,
             )
 
             predicted_map = rendered_output["render"]
@@ -365,7 +371,10 @@ def training(
 
     print(f"[Train] Train set size: {len(scene.train_set)} | Test set size: {len(scene.test_set)} | Batch size: {getattr(model_params, 'batch_size', 'unknown')} | Total iterations: {total_iterations} | Epochs: {scene.num_epochs}")
 
-    print(f"[Train] Beam grid: Rx {scene.rx_shape} = {scene.beam_rows} beams | Tx {scene.tx_shape} = {scene.beam_cols} beams")
+    if scene.beam_grid_mode == "custom_angles":
+        print(f"[Train] Beam grid: custom_angles, {len(scene.beam_az_deg)} az x {len(scene.beam_el_deg)} el = {scene.beam_rows} beams (non-periodic, wrap disabled)")
+    else:
+        print(f"[Train] Beam grid: Rx {scene.rx_shape} = {scene.beam_rows} beams | Tx {scene.tx_shape} = {scene.beam_cols} beams")
 
     iteration = 0
     ema_loss = 0.0
@@ -407,6 +416,9 @@ def training(
                             model_params.use_cuda_rasterizer
                         )
                     ),
+                    beam_grid_mode=scene.beam_grid_mode,
+                    beam_az_deg=scene.beam_az_deg,
+                    beam_el_deg=scene.beam_el_deg,
                 )
 
                 predicted_map = rendered_output["render"]

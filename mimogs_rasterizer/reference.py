@@ -23,6 +23,10 @@ def wrap_beam_delta(delta: torch.Tensor) -> torch.Tensor:
 
     The map is piecewise identity with unit slope, so gradients are unchanged
     away from the (measure-zero) branch cut.
+
+    This is DFT-specific.  A measured analog steering codebook has bounded,
+    non-periodic beam centres, so wrapping would fold distant beams onto each
+    other; those callers pass ``periodic=False`` and use the raw difference.
     """
     return torch.remainder(delta + 1.0, 2.0) - 1.0
 
@@ -33,6 +37,7 @@ def topk_gaussian_beam_weights(
     beam_centers_uv: torch.Tensor,
     k: int,
     weight_floor: float = 0.0,
+    periodic: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Evaluate an anisotropic Gaussian only on its top-k beam bins.
 
@@ -45,6 +50,9 @@ def topk_gaussian_beam_weights(
             to the strongest selected beam (whose relative weight is one), so
             negligible beams can be dropped but the row can never collapse to
             all zeros.
+        periodic: whether the beam centres are a DFT grid, i.e. period-2 in the
+            beam coordinate.  ``False`` (a measured steering codebook) uses the
+            raw difference -- see ``wrap_beam_delta``.
 
     Returns:
         normalized top-k values and int64 beam indices, each with shape
@@ -69,10 +77,13 @@ def topk_gaussian_beam_weights(
     if k_eff <= 0:
         raise ValueError(f"k must be positive, got {k}")
 
-    # Wrapped modulo 2: this feeds both the weight exponent and, through the
-    # logits, the top-k candidate selection below.
-    dx = wrap_beam_delta(beam_centers_uv[:, 0] - uv_mean[..., 0, None])
-    dy = wrap_beam_delta(beam_centers_uv[:, 1] - uv_mean[..., 1, None])
+    # Wrapped modulo 2 on the DFT grid: this feeds both the weight exponent
+    # and, through the logits, the top-k candidate selection below.  A custom
+    # steering codebook is non-periodic and uses the raw difference.
+    delta_x = beam_centers_uv[:, 0] - uv_mean[..., 0, None]
+    delta_y = beam_centers_uv[:, 1] - uv_mean[..., 1, None]
+    dx = wrap_beam_delta(delta_x) if periodic else delta_x
+    dy = wrap_beam_delta(delta_y) if periodic else delta_y
 
     p00 = precision[..., 0, None]
     p01 = precision[..., 1, None]
@@ -171,13 +182,14 @@ def beam_splat_reference(
     k_tx: int,
     weight_floor: float = 0.0,
     return_aux: bool = False,
+    periodic: bool = True,
 ):
     """Complete differentiable reference beam-pair rasterizer."""
     rx_weights, rx_indices = topk_gaussian_beam_weights(
-        rx_uv, rx_precision, rx_centers, k_rx, weight_floor
+        rx_uv, rx_precision, rx_centers, k_rx, weight_floor, periodic
     )
     tx_weights, tx_indices = topk_gaussian_beam_weights(
-        tx_uv, tx_precision, tx_centers, k_tx, weight_floor
+        tx_uv, tx_precision, tx_centers, k_tx, weight_floor, periodic
     )
     output = sparse_outer_splat_reference(
         rx_weights,

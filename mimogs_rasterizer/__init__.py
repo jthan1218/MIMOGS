@@ -34,14 +34,20 @@ def beam_splat(
     k_tx: int,
     weight_floor: float = 0.0,
     use_cuda_extension: bool = True,
+    periodic: bool = True,
 ):
     """Rasterize a batch of beam-pair power maps.
 
     Falls back to the fully differentiable PyTorch implementation when the
     extension is unavailable or when any input is not a CUDA float32 tensor.
+
+    ``periodic=False`` (custom, non-DFT beam centres) also forces the reference
+    path: the CUDA kernel wraps beam deltas modulo 2 unconditionally, which is
+    only correct for a DFT grid.
     """
     can_use_cuda = (
         use_cuda_extension
+        and periodic
         and beam_splat_cuda is not None
         and cuda_extension_available()
         and rx_uv.is_cuda
@@ -83,6 +89,7 @@ def beam_splat(
         int(k_rx),
         int(k_tx),
         float(weight_floor),
+        periodic=bool(periodic),
     )
 
 

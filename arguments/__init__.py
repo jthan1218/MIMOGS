@@ -64,17 +64,29 @@ class ModelParams(ParamGroup):
         self.tx_shape_h = 21
         self.tx_shape_v = 3
 
+        # Beam-grid mode.  "dft" (default) keeps the DFT beam centers derived
+        # from the (horizontal, vertical) array shape above and reproduces
+        # every DeepMIMO result exactly.  "custom_angles" places the beam
+        # centers at a measured analog steering codebook instead; the beam
+        # count is then len(az) * len(el) and the array shape is unused.
+        self.beam_grid_mode = "dft"
+
+        # Comma-separated steering angles in degrees for "custom_angles".
+        # Empty means the measured 60 GHz defaults (21 azimuth x 3 elevation).
+        self.beam_az_deg = ""
+        self.beam_el_deg = ""
+
         self.init_mode = "random"
         self.vertices_path = ""
-        self.max_active_rx_beams = 4
-        self.max_active_tx_beams = 4
+        self.max_active_rx_beams = 8
+        self.max_active_tx_beams = 8
         self.renormalize_local_beam_weights = True
 
         # Renderer/training settings. Integers are used instead of bools
         # so both 0 and 1 can be supplied through the existing ParamGroup.
         self.batch_size = 8
         self.num_workers = 0
-        self.num_epochs = 1000
+        self.num_epochs = 100
         self.target_gaussians = 25_000
         self.use_cuda_rasterizer = 1
         self.use_amp = 0
