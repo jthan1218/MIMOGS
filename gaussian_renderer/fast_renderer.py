@@ -230,8 +230,9 @@ def render_fast(
     else:
         az = parse_angle_list(beam_az_deg, MEASURED_BEAM_AZ_DEG)
         el = parse_angle_list(beam_el_deg, MEASURED_BEAM_EL_DEG)
-        rx_centers = _build_custom_uv_grid(az, el, device=device, dtype=dtype)
-        tx_centers = rx_centers
+        # The two sides use opposite azimuth signs; see _build_custom_uv_grid.
+        rx_centers = _build_custom_uv_grid(az, el, device=device, dtype=dtype, side="rx")
+        tx_centers = _build_custom_uv_grid(az, el, device=device, dtype=dtype, side="tx")
 
     output = beam_splat(
         rx_uv=rx_uv,

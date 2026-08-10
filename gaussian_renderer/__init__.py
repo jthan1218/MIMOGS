@@ -98,6 +98,7 @@ def _build_custom_uv_grid(
     el_deg,
     device,
     dtype,
+    side: str = "tx",
 ) -> torch.Tensor:
     """Beam centers for a measured analog steering codebook.
 
@@ -113,9 +114,28 @@ def _build_custom_uv_grid(
         u = d_y = cos(el) * sin(az)
         v = d_z = sin(el)
 
-    THIS IS THE ONE PLACE TO ADJUST if a LoS sanity check shows the mapping is
-    flipped: the fix is a sign on u/v here, or swapping the roles of az and el
-    -- nothing downstream encodes the angle convention.
+    ``side`` selects the azimuth sign convention, and is THE ONE PLACE that
+    encodes it -- nothing downstream does.
+
+    ``side="tx"`` (default, unchanged) keeps ``u = +cos(el) sin(az)``.  The
+    renderer feeds the Tx projection ``uv = +unit(x_tx - b)``, the departure
+    direction from the BS toward the primitive, so a positive azimuth on the
+    codebook already means a positive ``d_y`` and the raw grid is correct.
+
+    ``side="rx"`` uses ``u = -cos(el) sin(az)``.  The Rx projection is NEGATED
+    in the renderer (``rx_uv = -rx_uv``), so it supplies ``-unit(x_k - p)``
+    while the physical angle of arrival at the UE is ``+unit(x_k - p)``.  The
+    two negations cancel and the Rx azimuth is read in the physical convention.
+    Without this the Rx grid encodes a 180 deg UE-panel yaw, which the measured
+    data contradicts: regressing the measured dominant-beam ``u`` on the UE
+    position gives ``du/dp_y = -0.32`` per metre, whereas for any fixed
+    scatterer the un-negated convention forces ``du/dp_y > 0``.  The LoS
+    dominant-beam argmax audit is the acceptance check for this sign.
+
+    The elevation sign is deliberately NOT flipped: every UE in the measured
+    set sits at one height, so reflecting a primitive's z about the UE plane
+    flips ``v`` for every location at once -- an exact gauge freedom of the
+    model, unlike the azimuth.
 
     Beams are emitted azimuth-fastest (elevation outer, azimuth inner) so the
     row order matches the dataset's beam indexing.
@@ -127,8 +147,10 @@ def _build_custom_uv_grid(
     el_deg = tuple(float(e) for e in el_deg)
     if not az_deg or not el_deg:
         raise ValueError("custom beam grid needs at least one azimuth and one elevation")
+    if side not in ("rx", "tx"):
+        raise ValueError(f"side must be 'rx' or 'tx', got {side!r}")
 
-    key = (az_deg, el_deg, str(device), str(dtype))
+    key = (az_deg, el_deg, str(device), str(dtype), side)
     cached = _CUSTOM_BEAM_UV_GRID_CACHE.get(key, None)
     if cached is not None:
         return cached
@@ -140,7 +162,8 @@ def _build_custom_uv_grid(
     el = torch.tensor(el_deg, device=device, dtype=torch.float64) * deg2rad
 
     # (num_el, num_az) -> flattened azimuth-fastest.
-    u = torch.cos(el).unsqueeze(1) * torch.sin(az).unsqueeze(0)
+    u_sign = -1.0 if side == "rx" else 1.0
+    u = u_sign * torch.cos(el).unsqueeze(1) * torch.sin(az).unsqueeze(0)
     v = torch.sin(el).unsqueeze(1).expand_as(u)
 
     centers_uv = torch.stack([u.reshape(-1), v.reshape(-1)], dim=-1).to(dtype).contiguous()
@@ -480,10 +503,13 @@ def render(
     else:
         az = parse_angle_list(beam_az_deg, MEASURED_BEAM_AZ_DEG)
         el = parse_angle_list(beam_el_deg, MEASURED_BEAM_EL_DEG)
+        # The two sides use opposite azimuth signs; see _build_custom_uv_grid.
         rx_beam_centers_uv = _build_custom_uv_grid(
-            az, el, device = means.device, dtype = means.dtype
+            az, el, device = means.device, dtype = means.dtype, side = "rx"
         )
-        tx_beam_centers_uv = rx_beam_centers_uv
+        tx_beam_centers_uv = _build_custom_uv_grid(
+            az, el, device = means.device, dtype = means.dtype, side = "tx"
+        )
 
     # ------------------------------------------------------------------
     # Covariance-aware soft projection to Rx beam-domain
