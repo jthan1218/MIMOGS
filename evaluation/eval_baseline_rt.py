@@ -83,7 +83,7 @@ from eval_render import (
 from utils.loss import normalize_mag_map
 
 
-DEFAULT_CKPT = "outputs/20260805_051724"
+DEFAULT_CKPT = "outputs/20260810_052854"
 DEFAULT_SIONNA_MAT = "dataset/asu_sionna_16by64_lt/full_dataset.mat"
 DEFAULT_MATCH_TOL = 1e-3
 DEFAULT_MIN_MATCH_FRACTION = 0.90
