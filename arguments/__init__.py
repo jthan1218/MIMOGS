@@ -66,8 +66,8 @@ class ModelParams(ParamGroup):
 
         self.init_mode = "random"
         self.vertices_path = ""
-        self.max_active_rx_beams = 4
-        self.max_active_tx_beams = 4
+        self.max_active_rx_beams = 8
+        self.max_active_tx_beams = 8
         self.renormalize_local_beam_weights = True
 
         # Renderer/training settings. Integers are used instead of bools
