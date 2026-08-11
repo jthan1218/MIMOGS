@@ -83,7 +83,7 @@ from eval_render import (
 from utils.loss import normalize_mag_map
 
 
-DEFAULT_CKPT = "outputs/20260810_052854"
+DEFAULT_CKPT = "outputs/20260811_062015"
 DEFAULT_SIONNA_MAT = "dataset/asu_sionna_16by64_lt/full_dataset.mat"
 DEFAULT_MATCH_TOL = 1e-3
 DEFAULT_MIN_MATCH_FRACTION = 0.90
@@ -597,6 +597,45 @@ def plot_spatial_nmse_maps(
 
     return vmin, vmax, gap_limit
 
+def plot_gap_map_paper(
+    output_dir: str,
+    positions: np.ndarray,
+    gap_db: np.ndarray,
+) -> None:
+    """Standalone gap-only panel for the paper."""
+    plt.rcParams["font.family"] = "serif"
+    plt.rcParams["font.serif"] = ["Times New Roman", "Times", "Nimbus Roman", "DejaVu Serif"]
+    plt.rcParams["mathtext.fontset"] = "stix"
+    gap_limit = symmetric_gap_limit(gap_db)
+
+    figure, axis = plt.subplots(figsize=(3.6, 3.0), layout="constrained")
+    scatter = axis.scatter(
+        positions[:, 0],
+        positions[:, 1],
+        c=gap_db,
+        s=4,
+        cmap="RdBu_r",
+        vmin=-gap_limit,
+        vmax=gap_limit,
+        linewidths=0.0,
+        rasterized=True,
+    )
+    axis.set_xlabel("x [m]", fontsize=6)
+    axis.set_ylabel("y [m]", fontsize=6)
+    axis.tick_params(labelsize=5)
+    axis.set_aspect("equal", adjustable="box")
+    axis.grid(alpha=0.3, linewidth=0.5)
+
+    colorbar = figure.colorbar(scatter, ax=axis, fraction=0.046, pad=0.03)
+    colorbar.set_label(r"$\Delta$NMSE [dB]", fontsize=6)
+    colorbar.ax.tick_params(labelsize=5)
+
+    figure.savefig(os.path.join(output_dir, "fig_gap_map_paper.png"),
+                   dpi=300, bbox_inches="tight", pad_inches=0.02)
+    figure.savefig(os.path.join(output_dir, "fig_gap_map_paper.pdf"),
+                   dpi=300, bbox_inches="tight", pad_inches=0.02)
+    plt.close(figure)
+
 
 def select_qualitative_rows(difference: np.ndarray) -> List[Tuple[int, str]]:
     """Pick the two extremes of the disagreement plus one median location."""
@@ -1109,6 +1148,8 @@ def main() -> None:
         f"{100.0 * mimogs_win_fraction:.2f}%  | NMSE scale "
         f"[{nmse_vmin:.1f}, {nmse_vmax:.1f}] dB, gap clip +/-{gap_limit:.0f} dB"
     )
+
+    plot_gap_map_paper(output_dir, matched_positions, difference)
 
     qualitative_rows = select_qualitative_rows(difference)
     plot_qualitative(
