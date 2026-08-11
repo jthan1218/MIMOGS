@@ -597,6 +597,39 @@ def plot_spatial_nmse_maps(
 
     return vmin, vmax, gap_limit
 
+def plot_gap_map_paper(
+    output_dir: str,
+    positions: np.ndarray,
+    gap_db: np.ndarray,
+) -> None:
+    """Standalone gap-only panel for the paper: no in-figure title,
+    short colorbar label; sign/clip conventions go in the LaTeX caption."""
+    gap_limit = symmetric_gap_limit(gap_db)
+
+    figure, axis = plt.subplots(figsize=(3.6, 3.3), layout="constrained")
+    scatter = axis.scatter(
+        positions[:, 0],
+        positions[:, 1],
+        c=gap_db,
+        s=4,
+        cmap="coolwarm",
+        vmin=-gap_limit,
+        vmax=gap_limit,
+        linewidths=0.0,
+        rasterized=True,   # PDF는 벡터 유지하되 점들만 래스터화 (파일 가볍게)
+    )
+    axis.set_xlabel("x [m]")
+    axis.set_ylabel("y [m]")
+    axis.set_aspect("equal", adjustable="box")
+    axis.grid(alpha=0.3, linewidth=0.5)
+
+    colorbar = figure.colorbar(scatter, ax=axis, fraction=0.046, pad=0.03)
+    colorbar.set_label(r"$\Delta$NMSE [dB]")
+
+    figure.savefig(os.path.join(output_dir, "fig_gap_map_paper.png"), dpi=300)
+    figure.savefig(os.path.join(output_dir, "fig_gap_map_paper.pdf"), dpi=300)
+    plt.close(figure)
+
 
 def select_qualitative_rows(difference: np.ndarray) -> List[Tuple[int, str]]:
     """Pick the two extremes of the disagreement plus one median location."""
@@ -1109,6 +1142,8 @@ def main() -> None:
         f"{100.0 * mimogs_win_fraction:.2f}%  | NMSE scale "
         f"[{nmse_vmin:.1f}, {nmse_vmax:.1f}] dB, gap clip +/-{gap_limit:.0f} dB"
     )
+
+    plot_gap_map_paper(output_dir, matched_positions, difference)
 
     qualitative_rows = select_qualitative_rows(difference)
     plot_qualitative(

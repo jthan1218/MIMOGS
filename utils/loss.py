@@ -74,7 +74,7 @@ def composite_magnitude_loss(
     shape_loss = magnitude_nmse_loss(pred_n, target_n, eps=eps)
     topk_loss = topk_shape_loss(pred_n, target_n, topk_ratio=topk_ratio)
 
-    total_loss = 0.4 * scale_loss + 0.4 * shape_loss + 0.2 * topk_loss
+    total_loss = 0.4 * scale_loss + 0.6 * shape_loss + 0 * topk_loss
 
     if return_terms:
         return (
