@@ -90,12 +90,12 @@ SOLID_SCHEMES = ("mimogs_greedy", "genie_greedy", "random")
 DASHED_SCHEMES = ("mimogs_toppower", "genie_toppower")
 # The two literature-anchored baselines.  Kept out of SOLID/DASHED so the
 # fig_net_rate_vs_Lt styling is untouched; they still reach every CSV.
-EXTRA_SCHEMES = ("position_nn", "statistical", "position_nn_clf")
+EXTRA_SCHEMES = ("statistical", "position_nn")
 ALL_SCHEMES = SOLID_SCHEMES + DASHED_SCHEMES
 CSV_SCHEMES = ALL_SCHEMES + EXTRA_SCHEMES
 
 # Selection rules that must be re-run per SNR (the metric contains P/sigma^2).
-GREEDY_SCHEMES = ("genie_greedy", "mimogs_greedy", "position_nn")
+GREEDY_SCHEMES = ("genie_greedy", "mimogs_greedy")
 
 SCHEME_LABEL = {
     "mimogs_greedy": "MIMO-GS (greedy)",
@@ -105,7 +105,6 @@ SCHEME_LABEL = {
     "genie_toppower": "Genie (top-power)",
     "position_nn": "Position NN",
     "statistical": "Statistical codebook",
-    "position_nn_clf": "Position NN classifier",
 }
 SCHEME_COLOR = {
     "mimogs_greedy": "tab:blue",
@@ -115,7 +114,6 @@ SCHEME_COLOR = {
     "genie_toppower": "tab:green",
     "position_nn": "tab:purple",
     "statistical": "tab:orange",
-    "position_nn_clf": "tab:cyan",
 }
 
 
@@ -319,7 +317,7 @@ def spectral_efficiency(
 
 
 CURVE_KEYS = (
-    "bound", "mimogs", "position_nn", "statistical", "position_nn_clf",
+    "bound", "mimogs", "position_nn", "statistical",
     "random", "exhaustive", "genie_same_budget",
     "scheme_prelog", "exhaustive_prelog",
 )
@@ -572,7 +570,6 @@ def build_curves(
         ("mimogs", "mimogs_greedy"),
         ("position_nn", "position_nn"),
         ("statistical", "statistical"),
-        ("position_nn_clf", "position_nn_clf"),
         ("random", "random"),
     ):
         if source in raw:
@@ -583,12 +580,11 @@ def build_curves(
 # Listed in legend order; zorder is explicit so the visual stacking does not
 # have to follow it (Random must sit underneath everything).
 PLOT_SERIES = (
-    # (curve key, label, color, linestyle, marker, linewidth, zorder)
     ("bound", "Zero-overhead bound", "black", "--", None, 1.8, 6),
     ("mimogs", "MIMO-GS", SCHEME_COLOR["mimogs_greedy"], "-", "o", 1.8, 5),
+    ("position_nn", "Position NN", SCHEME_COLOR["position_nn"], "-", "X", 1.6, 4.5),
     ("exhaustive", "Exhaustive sweep", "tab:red", "-.", "d", 1.8, 4),
     ("statistical", "Statistical codebook", SCHEME_COLOR["statistical"], "-", "v", 1.8, 3),
-    ("position_nn_clf", "Position NN classifier", SCHEME_COLOR["position_nn_clf"], "-", "X", 1.6, 2.0),
     ("random", "Random", SCHEME_COLOR["random"], "-", "s", 1.1, 1),
 )
 # With seven curves the Random floor is faded so it does not compete visually
@@ -632,11 +628,12 @@ def plot_curves(
 
     if log_x:
         axis.set_xscale("log", base=2)
-    axis.set_xlabel(x_label)
-    axis.set_ylabel("Mean net rate $R_{sel}$ [bps/Hz]")
-    axis.set_title(title, fontsize=11)
+    axis.set_xlabel(x_label, fontsize=14)
+    axis.set_ylabel("Average net rate $R_{sel}$ [bps/Hz]", fontsize=14)
+    axis.tick_params(axis="both", labelsize=12) 
+    # axis.set_title(title, fontsize=11)
     axis.grid(alpha=0.3, linewidth=0.5)
-    axis.legend(fontsize=8.5, loc="best")
+    axis.legend(fontsize=10, loc="lower right")
     axis.set_ylim(bottom=0.0)
 
     save_figure(figure, output_dir, stem)
@@ -709,8 +706,7 @@ CDF_SERIES = (
     # (scheme key, label, color, linewidth, zorder)
     ("genie_greedy", "Genie", SCHEME_COLOR["genie_greedy"], 1.8, 5),
     ("mimogs_greedy", "MIMO-GS", SCHEME_COLOR["mimogs_greedy"], 1.8, 4),
-    ("position_nn_clf", "Position NN classifier",
-     SCHEME_COLOR["position_nn_clf"], 1.6, 3.2),
+    ("position_nn", "Position NN", SCHEME_COLOR["position_nn"], 1.6, 3.2),
     ("statistical", "Statistical codebook", SCHEME_COLOR["statistical"], 1.8, 3),
     ("random", "Random", SCHEME_COLOR["random"], 1.2, 1),
 )
@@ -1211,7 +1207,7 @@ def main() -> None:
         )
     )
     baseline_diagnostic: Dict[str, str] = {
-        "position_nn_clf": (
+        "position_nn": (
             f"classifier top-1 {100.0 * classifier_accuracy[1]:.2f}% / top-4 "
             f"{100.0 * classifier_accuracy[4]:.2f}% against the rendered map's "
             f"{rendered_nmse_db:.2f} dB NMSE (TRAIN only, asserted)"
@@ -1228,9 +1224,8 @@ def main() -> None:
         "genie_greedy": greedy_order(genie_map, snr, num_rx, max(lt_grid)),
         "mimogs_toppower": toppower_order(mimogs_map),
         "genie_toppower": toppower_order(genie_map),
-        "position_nn": greedy_order(neighbour_map, snr, num_rx, max(lt_grid)),
+        "position_nn": position_nn_clf_order,
         "statistical": statistical_order,
-        "position_nn_clf": position_nn_clf_order,
     }
 
     generator = torch.Generator(device=device)
@@ -1534,7 +1529,7 @@ def main() -> None:
         "fig_net_rate_vs_Lt",
         lt_grid,
         net_rates,
-        "Mean net rate $R_{sel}$ [bps/Hz]",
+        "Average net rate $R_{sel}$ [bps/Hz]",
         f"Net achievable rate vs. $L_t$  "
         f"(SNR {arguments.snr_db:g} dB, $L_r$={num_rx}, "
         f"$\\tau_{{RS}}/T_B$={arguments.tau_over_tb:g})",
@@ -1549,11 +1544,11 @@ def main() -> None:
     selection_maps = {
         "mimogs_greedy": mimogs_map,
         "genie_greedy": genie_map,
-        "position_nn": neighbour_map,
+        # "position_nn": neighbour_map,
     }
     fixed_orders = {
         "statistical": statistical_order,
-        "position_nn_clf": position_nn_clf_order,
+        "position_nn": position_nn_clf_order,
     }
 
     alignment = plot_alignment_efficiency(output_dir, lt_grid, raw_rates)
@@ -1605,7 +1600,6 @@ def main() -> None:
                 "net_mimogs",
                 "net_position_nn",
                 "net_statistical",
-                "net_position_nn_clf",
                 "net_random",
                 "net_exhaustive",
                 "genie_same_budget_reference",
@@ -1628,7 +1622,6 @@ def main() -> None:
                     f"{mimogs_value:.8f}",
                     f"{tb_curves['position_nn'][index]:.8f}",
                     f"{tb_curves['statistical'][index]:.8f}",
-                    f"{tb_curves['position_nn_clf'][index]:.8f}",
                     f"{tb_curves['random'][index]:.8f}",
                     f"{exhaustive_value:.8f}",
                     f"{tb_curves['genie_same_budget'][index]:.8f}",
@@ -1715,7 +1708,6 @@ def main() -> None:
                     f"{mimogs_value:.8f}",
                     f"{snr_curves['position_nn'][index]:.8f}",
                     f"{snr_curves['statistical'][index]:.8f}",
-                    f"{snr_curves['position_nn_clf'][index]:.8f}",
                     f"{snr_curves['random'][index]:.8f}",
                     f"{exhaustive_value:.8f}",
                     f"{snr_curves['genie_same_budget'][index]:.8f}",
@@ -1779,7 +1771,6 @@ def main() -> None:
     ):
         for weaker, stronger in (
             ("position_nn", "mimogs"),
-            ("position_nn_clf", "mimogs"),
             ("statistical", "position_nn"),
             ("random", "statistical"),
         ):
