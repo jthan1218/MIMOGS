@@ -1052,7 +1052,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
     "--ckpt",
     type=str,
-    default="outputs/20260805_051724/model.pth",
+    default="outputs/20260811_062015/model.pth",
     help="Run directory (outputs/<run_dir>) or a model.pth path.",
     )
     parser.add_argument("--outputs_root", type=str, default="outputs")
