@@ -848,8 +848,8 @@ def to_error_panel(gt_map: torch.Tensor, predicted_map: torch.Tensor) -> np.ndar
 
 def panel_limits(scale: str) -> Tuple[float, float, str]:
     if scale == "linear":
-        return 0.0, 1.0, "Normalized magnitude"
-    return DB_FLOOR, 0.0, "Normalized magnitude [dB]"
+        return 0.0, 1.0, "Normalized power"
+    return DB_FLOOR, 0.0, "Normalized power [dB]"
 
 
 def compute_error_vmax(results: Dict[str, object]) -> float:
