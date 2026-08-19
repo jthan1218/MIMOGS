@@ -15,4 +15,6 @@ mimogs_rasterizer/build/
 
 analysis/
 
-tests/
+tests/.ipynb_checkpoints/
+
+.ipynb_checkpoints/
