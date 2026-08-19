@@ -91,14 +91,18 @@ DASHED_SCHEMES = ("mimogs_toppower", "genie_toppower")
 # The two literature-anchored baselines.  Kept out of SOLID/DASHED so the
 # fig_net_rate_vs_Lt styling is untouched; they still reach every CSV.
 EXTRA_SCHEMES = ("statistical", "position_nn")
+# The position-to-map MLP regressor, driven through the SAME greedy rule as
+# MIMO-GS.  Appended last so every pre-existing CSV column keeps its position.
+MLP_SCHEMES = ("mlp_greedy",)
 ALL_SCHEMES = SOLID_SCHEMES + DASHED_SCHEMES
-CSV_SCHEMES = ALL_SCHEMES + EXTRA_SCHEMES
+CSV_SCHEMES = ALL_SCHEMES + EXTRA_SCHEMES + MLP_SCHEMES
 
 # Selection rules that must be re-run per SNR (the metric contains P/sigma^2).
 GREEDY_SCHEMES = ("genie_greedy", "mimogs_greedy")
 
 SCHEME_LABEL = {
     "mimogs_greedy": "MIMO-GS (greedy)",
+    "mlp_greedy": "MLP",
     "genie_greedy": "Genie (greedy)",
     "random": "Random",
     "mimogs_toppower": "MIMO-GS (top-power)",
@@ -108,6 +112,7 @@ SCHEME_LABEL = {
 }
 SCHEME_COLOR = {
     "mimogs_greedy": "tab:blue",
+    "mlp_greedy": "tab:brown",
     "genie_greedy": "tab:green",
     "random": "tab:gray",
     "mimogs_toppower": "tab:blue",
@@ -196,6 +201,105 @@ def _nearest_train(
             indices[start:stop] = block.argmin(axis=1)
             distances[start:stop] = block.min(axis=1)
         return distances, indices
+
+
+# ----------------------------------------------------------------------
+# MLP scheme
+# ----------------------------------------------------------------------
+MLP_CHECKPOINT = os.path.join("outputs", "density", "MLP", "model_100.pth")
+MLP_BATCH = 4096
+
+
+def render_position_mlp(
+    checkpoint_path: str,
+    positions: torch.Tensor,
+    beam_rows: int,
+    beam_cols: int,
+    device: torch.device,
+) -> Tuple[torch.Tensor, Dict[str, object]]:
+    """Predicted ``(N, N_r, N_t)`` beam-pair maps from the position-to-map MLP.
+
+    The model is rebuilt from the repacked checkpoint alone -- ``train_MLP.py``'s
+    own ``PositionMLP``, sized by the checkpoint's ``arch`` block, so the Fourier
+    encoding (``num_frequencies`` / ``include_input``) is the one that was
+    trained with rather than an assumed default.
+
+    ``positions`` must be the tensor ``scene.test_set`` holds: ``DeepMIMODataset``
+    divides every coordinate by ``abs().max() + 1e-6`` of its own ``.mat`` file at
+    construction, and ``train_MLP.py`` feeds exactly that tensor (through
+    ``scene.test_iter``) both when training and when scoring.  Reusing the Scene's
+    copy reproduces the training normalization by construction.
+
+    ``PositionMLP.forward`` ends in ``softplus``, so the prediction is
+    non-negative by construction and is deliberately NOT clamped here.
+    """
+    if not os.path.isfile(checkpoint_path):
+        raise SystemExit(
+            f"[eval_net_rate] MLP checkpoint '{checkpoint_path}' is missing. "
+            f"Build it with 'python evaluation/train_density_MLP.py', which "
+            f"writes outputs/density/MLP/model_100.pth."
+        )
+
+    from evaluation.train_MLP import PositionMLP  # noqa: PLC0415 -- local import
+
+    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    for key in ("state_dict", "arch"):
+        if key not in payload:
+            raise SystemExit(
+                f"[eval_net_rate] MLP checkpoint '{checkpoint_path}' has no "
+                f"'{key}'; it is not a train_density_MLP.py repack."
+            )
+
+    arch = payload["arch"]
+    num_outputs = int(arch["num_outputs"])
+
+    if num_outputs != int(beam_rows) * int(beam_cols):
+        raise SystemExit(
+            f"[eval_net_rate] the MLP emits {num_outputs} values but the dataset "
+            f"beam grid is {beam_rows}x{beam_cols}."
+        )
+    for key, expected in (("beam_rows", beam_rows), ("beam_cols", beam_cols)):
+        if key in payload and int(payload[key]) != int(expected):
+            raise SystemExit(
+                f"[eval_net_rate] MLP checkpoint {key}={int(payload[key])} but the "
+                f"dataset has {int(expected)}."
+            )
+
+    model = PositionMLP(
+        num_outputs=num_outputs,
+        hidden=int(arch["hidden"]),
+        depth=int(arch["depth"]),
+        num_frequencies=int(arch["num_frequencies"]),
+        include_input=bool(arch["include_input"]),
+    ).to(device)
+    model.load_state_dict(payload["state_dict"])
+    model.eval()
+
+    chunks: List[torch.Tensor] = []
+    with torch.no_grad():
+        for start in range(0, int(positions.shape[0]), MLP_BATCH):
+            batch = positions[start:start + MLP_BATCH].to(device).reshape(-1, 3)
+            chunks.append(model(batch.float()).float())
+
+    predicted = torch.cat(chunks, dim=0).reshape(-1, int(beam_rows), int(beam_cols))
+
+    if not bool(torch.isfinite(predicted).all()):
+        raise SystemExit(
+            "[eval_net_rate] the MLP produced non-finite values on the test split."
+        )
+    # softplus guarantees this; asserted rather than clamped so a future change
+    # of output activation surfaces instead of being silently papered over.
+    assert float(predicted.min()) >= 0.0, (
+        f"PositionMLP returned a negative value ({float(predicted.min()):.3g}); "
+        f"its output activation is no longer softplus."
+    )
+
+    return predicted, payload
+
+
+def relative_gap(value: float, reference: float) -> float:
+    """``(value - reference) / reference`` in percent, safe at reference 0."""
+    return 100.0 * (float(value) - float(reference)) / max(abs(float(reference)), 1e-12)
 
 
 # ----------------------------------------------------------------------
@@ -317,7 +421,7 @@ def spectral_efficiency(
 
 
 CURVE_KEYS = (
-    "bound", "mimogs", "position_nn", "statistical",
+    "bound", "mimogs", "mlp", "position_nn", "statistical",
     "random", "exhaustive", "genie_same_budget",
     "scheme_prelog", "exhaustive_prelog",
 )
@@ -543,7 +647,7 @@ def build_curves(
 
     * ``bound``      -- prelog 1, GT-selected subspace at the SAME data budget
       ``fixed_lt``.  Perfect selection AND free measurement: the ceiling.
-    * ``mimogs`` / ``position_nn`` / ``statistical`` / ``random`` -- prelog
+    * ``mimogs`` / ``mlp`` / ``position_nn`` / ``statistical`` / ``random`` -- prelog
       ``1 - fixed_lt*tau_RS/T_B``, differing only in which map (or fixed
       codebook) drives the transmit selection.  Because they share a prelog,
       any separation between them is pure selection quality.
@@ -568,6 +672,7 @@ def build_curves(
     }
     for key, source in (
         ("mimogs", "mimogs_greedy"),
+        ("mlp", "mlp_greedy"),
         ("position_nn", "position_nn"),
         ("statistical", "statistical"),
         ("random", "random"),
@@ -582,6 +687,7 @@ def build_curves(
 PLOT_SERIES = (
     ("bound", "Zero-overhead bound", "black", "--", None, 1.8, 6),
     ("mimogs", "MIMO-GS", SCHEME_COLOR["mimogs_greedy"], "-", "o", 1.8, 5),
+    ("mlp", "MLP", SCHEME_COLOR["mlp_greedy"], "-", "^", 1.6, 4.8),
     ("position_nn", "Position NN", SCHEME_COLOR["position_nn"], "-", "X", 1.6, 4.5),
     ("exhaustive", "Exhaustive sweep", "tab:red", "-.", "d", 1.8, 4),
     ("statistical", "Statistical codebook", SCHEME_COLOR["statistical"], "-", "v", 1.8, 3),
@@ -706,6 +812,7 @@ CDF_SERIES = (
     # (scheme key, label, color, linewidth, zorder)
     ("genie_greedy", "Genie", SCHEME_COLOR["genie_greedy"], 1.8, 5),
     ("mimogs_greedy", "MIMO-GS", SCHEME_COLOR["mimogs_greedy"], 1.8, 4),
+    ("mlp_greedy", "MLP", SCHEME_COLOR["mlp_greedy"], 1.6, 3.6),
     ("position_nn", "Position NN", SCHEME_COLOR["position_nn"], 1.6, 3.2),
     ("statistical", "Statistical codebook", SCHEME_COLOR["statistical"], 1.8, 3),
     ("random", "Random", SCHEME_COLOR["random"], 1.2, 1),
@@ -1015,6 +1122,38 @@ def main() -> None:
     mimogs_map = scale_for_selection(rendered)
     genie_map = scale_for_selection(ground_truth)
 
+    # ------------------------------------------------------------------
+    # MLP scheme: the position-to-map regressor evaluated on the SAME test
+    # positions, feeding the SAME greedy rule as MIMO-GS.
+    # ------------------------------------------------------------------
+    mlp_checkpoint_path = os.path.join(repository_root, MLP_CHECKPOINT)
+    mlp_prediction, mlp_payload = render_position_mlp(
+        mlp_checkpoint_path,
+        scene.test_set.positions,
+        int(scene.beam_rows),
+        tx_total,
+        device,
+    )
+    mlp_map = scale_for_selection(mlp_prediction)
+    print(
+        f"[eval_net_rate] MLP scheme: "
+        f"{os.path.relpath(mlp_checkpoint_path, repository_root)} "
+        f"(hidden {int(mlp_payload['arch']['hidden'])} x depth "
+        f"{int(mlp_payload['arch']['depth'])}, PE "
+        f"num_frequencies={int(mlp_payload['arch']['num_frequencies'])} "
+        f"include_input={bool(mlp_payload['arch']['include_input'])}, "
+        f"{int(mlp_payload.get('parameters', 0)):,} params, "
+        f"{int(mlp_payload.get('epochs', 0))} epochs)"
+    )
+    print(
+        f"  forwarded {int(mlp_prediction.shape[0])} test positions normalized by "
+        f"the Scene's own factor "
+        f"({float(getattr(scene.test_set, 'scale_factor', 1.0)):.6f}); output "
+        f"{tuple(int(v) for v in mlp_prediction.shape)}, finite, non-negative "
+        f"(softplus), range "
+        f"[{float(mlp_prediction.min()):.4g}, {float(mlp_prediction.max()):.4g}]"
+    )
+
     fixed_lt = max(1, min(int(arguments.fixed_lt), tx_total))
     fixed_tb = float(arguments.fixed_tb)
     full_sweep = tx_total
@@ -1206,6 +1345,14 @@ def main() -> None:
             )
         )
     )
+    mlp_nmse_db = float(
+        np.mean(
+            _shape_nmse_db(
+                mlp_prediction.detach().cpu().numpy().astype(np.float64),
+                test_magnitude,
+            )
+        )
+    )
     baseline_diagnostic: Dict[str, str] = {
         "position_nn": (
             f"classifier top-1 {100.0 * classifier_accuracy[1]:.2f}% / top-4 "
@@ -1217,10 +1364,15 @@ def main() -> None:
         f"  rendered map fidelity for reference: {rendered_nmse_db:.2f} dB "
         f"(max-normalized NMSE)"
     )
+    print(
+        f"  MLP map fidelity for reference     : {mlp_nmse_db:.2f} dB "
+        f"(max-normalized NMSE, same convention)"
+    )
 
     print("[eval_net_rate] building selection orders ...")
     orders: Dict[str, torch.Tensor] = {
         "mimogs_greedy": greedy_order(mimogs_map, snr, num_rx, max(lt_grid)),
+        "mlp_greedy": greedy_order(mlp_map, snr, num_rx, max(lt_grid)),
         "genie_greedy": greedy_order(genie_map, snr, num_rx, max(lt_grid)),
         "mimogs_toppower": toppower_order(mimogs_map),
         "genie_toppower": toppower_order(genie_map),
@@ -1305,7 +1457,21 @@ def main() -> None:
             f"MIMO-GS < Random at L_t={budget}: "
             f"{net_rates['mimogs_greedy'][slot]:.6f} < {net_rates['random'][slot]:.6f}"
         )
+        # The MLP selects from a predicted map, so the genie must dominate it
+        # for the same reason it dominates MIMO-GS.
+        genie_value = net_rates["genie_greedy"][slot]
+        mlp_value = net_rates["mlp_greedy"][slot]
+        if genie_value < mlp_value - tolerance:
+            message = (
+                f"Genie < MLP at L_t={budget} (greedy): "
+                f"{genie_value:.6f} < {mlp_value:.6f}"
+            )
+            warnings.append(message)
+            print(f"  WARNING: {message}")
     print("  Genie >= MIMO-GS >= Random at every L_t          : OK")
+    print("  Genie >= MLP at every L_t                        : "
+          + ("OK" if not any(m.startswith("Genie < MLP") for m in warnings)
+             else "SEE WARNINGS"))
 
     full_slot = list(lt_grid).index(max(lt_grid))
     full_values = [net_rates[scheme][full_slot] for scheme in CSV_SCHEMES]
@@ -1543,6 +1709,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     selection_maps = {
         "mimogs_greedy": mimogs_map,
+        "mlp_greedy": mlp_map,
         "genie_greedy": genie_map,
         # "position_nn": neighbour_map,
     }
@@ -1598,6 +1765,7 @@ def main() -> None:
                 "T_B",
                 "zero_overhead_bound",
                 "net_mimogs",
+                "net_mlp",
                 "net_position_nn",
                 "net_statistical",
                 "net_random",
@@ -1620,6 +1788,7 @@ def main() -> None:
                     int(block),
                     f"{bound_value:.8f}",
                     f"{mimogs_value:.8f}",
+                    f"{tb_curves['mlp'][index]:.8f}",
                     f"{tb_curves['position_nn'][index]:.8f}",
                     f"{tb_curves['statistical'][index]:.8f}",
                     f"{tb_curves['random'][index]:.8f}",
@@ -1685,6 +1854,7 @@ def main() -> None:
                 "snr_db",
                 "zero_overhead_bound",
                 "net_mimogs",
+                "net_mlp",
                 "net_position_nn",
                 "net_statistical",
                 "net_position_nn_clf",
@@ -1706,6 +1876,7 @@ def main() -> None:
                     f"{snr_db:g}",
                     f"{bound_value:.8f}",
                     f"{mimogs_value:.8f}",
+                    f"{snr_curves['mlp'][index]:.8f}",
                     f"{snr_curves['position_nn'][index]:.8f}",
                     f"{snr_curves['statistical'][index]:.8f}",
                     f"{snr_curves['random'][index]:.8f}",
@@ -1717,6 +1888,49 @@ def main() -> None:
                     f"{100.0 * exhaustive_value / max(bound_value, 1e-12):.4f}",
                 ]
             )
+
+    # ------------------------------------------------------------------
+    # MLP vs MIMO-GS: relative net-rate gap at every plotted operating point
+    # ------------------------------------------------------------------
+    operating_prelog = prelog_at(fixed_lt, tau_rs, fixed_tb)
+    operating_mimogs = operating_prelog * tb_raw["mimogs_greedy"]
+    operating_mlp = operating_prelog * tb_raw["mlp_greedy"]
+
+    print()
+    print(
+        "[eval_net_rate] MLP vs MIMO-GS  --  relative net-rate gap "
+        "(mlp - mimogs) / mimogs [%]"
+    )
+    print(
+        f"  operating point (L_t={fixed_lt}, T_B={fixed_tb:g}, "
+        f"SNR={arguments.snr_db:g} dB): MIMO-GS {operating_mimogs:.6f}  "
+        f"MLP {operating_mlp:.6f}  gap "
+        f"{relative_gap(operating_mlp, operating_mimogs):+.3f}%"
+    )
+    print(
+        f"  vs L_t  (tau_RS/T_B={arguments.tau_over_tb:g}, "
+        f"SNR={arguments.snr_db:g} dB)"
+    )
+    for slot, budget in enumerate(lt_grid):
+        print(
+            f"    L_t={budget:>3d}   MIMO-GS {net_rates['mimogs_greedy'][slot]:9.6f}"
+            f"   MLP {net_rates['mlp_greedy'][slot]:9.6f}   gap "
+            f"{relative_gap(net_rates['mlp_greedy'][slot], net_rates['mimogs_greedy'][slot]):+8.3f}%"
+        )
+    print(f"  vs SNR  (L_t={fixed_lt}, T_B={fixed_tb:g})")
+    for index, snr_db in enumerate(snr_grid_db):
+        print(
+            f"    SNR={snr_db:>5.1f} dB   MIMO-GS {snr_curves['mimogs'][index]:9.6f}"
+            f"   MLP {snr_curves['mlp'][index]:9.6f}   gap "
+            f"{relative_gap(snr_curves['mlp'][index], snr_curves['mimogs'][index]):+8.3f}%"
+        )
+    print(f"  vs T_B  (L_t={fixed_lt}, SNR={arguments.snr_db:g} dB)")
+    for index, block in enumerate(tb_grid):
+        print(
+            f"    T_B={int(block):>5d}      MIMO-GS {tb_curves['mimogs'][index]:9.6f}"
+            f"   MLP {tb_curves['mlp'][index]:9.6f}   gap "
+            f"{relative_gap(tb_curves['mlp'][index], tb_curves['mimogs'][index]):+8.3f}%"
+        )
 
     # ------------------------------------------------------------------
     # Sanity: the three-curve identity, ordering and monotonicity
@@ -1933,6 +2147,14 @@ def main() -> None:
         f"  GT long-term maps : {os.path.relpath(os.path.join(gt_root, 'test.mat'), repository_root)}"
         f"  -- TEST split only",
         f"  Complex channels  : {os.path.relpath(complex_path, repository_root)}",
+        f"  MLP checkpoint    : {os.path.relpath(mlp_checkpoint_path, repository_root)}"
+        f"  (hidden {int(mlp_payload['arch']['hidden'])} x depth "
+        f"{int(mlp_payload['arch']['depth'])}, "
+        f"{int(mlp_payload.get('parameters', 0)):,} params)",
+        f"                      the same position-to-map regressor as "
+        f"evaluation/train_MLP.py, driving the SAME greedy rule as MIMO-GS;",
+        f"                      max-normalized NMSE on TEST {mlp_nmse_db:.2f} dB "
+        f"(MIMO-GS render: {rendered_nmse_db:.2f} dB)",
         f"  Beam grid         : {int(scene.beam_rows)} Rx x {tx_total} Tx",
         f"  Test locations    : {num_locations}",
         f"  Realizations B    : {num_realizations} per location",
