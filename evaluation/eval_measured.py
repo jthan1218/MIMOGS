@@ -150,6 +150,9 @@ PANEL_MARGIN_W = 1.7
 # The final figure has no caption, so it needs less or the rows drift apart.
 PANEL_MARGIN_H = 1.5
 PANEL_MARGIN_H_FINAL = 1.0
+# The final figure names its columns "Spot k" so the text can refer to them;
+# the DeepMIMO counterpart figure titles its columns the same way.
+COLUMN_TITLE_FONTSIZE = 12
 
 # Gallery size: 0 draws every scored test location, which is what picking the
 # final figure's spots actually needs.  A positive --gallery_top keeps only that
@@ -996,6 +999,8 @@ def render_sample_grid(
             )
 
             axis.tick_params(labelsize=TICK_LABELSIZE)
+            if panel == 0:
+                axis.set_title(f"Spot {column + 1}", fontsize=COLUMN_TITLE_FONTSIZE)
             if column == 0:
                 axis.set_ylabel(label, fontsize=AXIS_LABEL_FONTSIZE)
             else:
@@ -1011,8 +1016,10 @@ def render_sample_grid(
         fraction=0.030,
         pad=0.012,
     )
-    colorbar.set_label(colorbar_label, fontsize=10)
-    colorbar.ax.tick_params(labelsize=9)
+    # The colorbar is a labelled axis like any other here, so its label and
+    # ticks follow the axis convention rather than the gallery's smaller sizes.
+    colorbar.set_label(colorbar_label, fontsize=AXIS_LABEL_FONTSIZE)
+    colorbar.ax.tick_params(labelsize=TICK_LABELSIZE)
 
     os.makedirs(output_dir, exist_ok=True)
     stem = f"fig_measured_samples_{scale}"
@@ -1296,8 +1303,11 @@ def build_readme(
         "  Figures     : gallery panels are ground truth / MIMO-GS / absolute error and",
         "                carry a small caption.  The final figure drops the error row --",
         "                two rows, ground truth and MIMO-GS, one column per chosen",
-        "                location -- and has no titles at all.  Axis labels 14 pt,",
-        "                ticks 12 pt.  Gallery PNG at 300 dpi, final figure PNG at",
+        "                location -- and names its columns 'Spot k' at "
+        f"{COLUMN_TITLE_FONTSIZE} pt.  Axis",
+        f"                labels {AXIS_LABEL_FONTSIZE} pt, ticks {TICK_LABELSIZE} pt, "
+        "colorbar label and ticks the",
+        "                same.  Gallery PNG at 300 dpi, final figure PNG at",
         "                300 dpi plus PDF.",
         "  Scales      : 'linear' = each map divided by its own max, shared 0..1",
         "                colorbar for ground truth and rendered.  'db' = 10*log10 of",
@@ -1368,7 +1378,7 @@ def build_readme(
     lines.append(
         "  Two rows (ground truth, MIMO-GS) x one column per chosen location; no error"
     )
-    lines.append("  row, no titles, one shared colorbar.")
+    lines.append("  row, column titles 'Spot k', one shared colorbar.")
     if spot_indices:
         lines.append(
             f"  Rendered for test indices "
