@@ -157,7 +157,7 @@ def x_limits(finite: Sequence[np.ndarray]) -> Optional[Sequence[float]]:
 
 def plot_cdf(values: Dict[str, np.ndarray], output_dir: str) -> Dict[str, np.ndarray]:
     """Draw one empirical CDF per method; return the finite samples used."""
-    figure, axis = plt.subplots(figsize=(7.0, 4.8))
+    figure, axis = plt.subplots(figsize=(6.5, 4.8))
     used: Dict[str, np.ndarray] = {}
 
     for label, column, color, width, zorder in CDF_SERIES:
