@@ -687,13 +687,12 @@ def build_curves(
 PLOT_SERIES = (
     ("bound", "Zero-overhead bound", "black", "--", None, 1.8, 6),
     ("mimogs", "MIMO-GS", SCHEME_COLOR["mimogs_greedy"], "-", "o", 1.8, 5),
-    ("mlp", "MLP", SCHEME_COLOR["mlp_greedy"], "-", "^", 1.6, 4.8),
     ("position_nn", "Position NN", SCHEME_COLOR["position_nn"], "-", "X", 1.6, 4.5),
     ("exhaustive", "Exhaustive sweep", "tab:red", "-.", "d", 1.8, 4),
     ("statistical", "Statistical codebook", SCHEME_COLOR["statistical"], "-", "v", 1.8, 3),
     ("random", "Random", SCHEME_COLOR["random"], "-", "s", 1.1, 1),
 )
-# With seven curves the Random floor is faded so it does not compete visually
+# With six curves the Random floor is faded so it does not compete visually
 # with the schemes actually under test.
 FAINT_SERIES = {"random"}
 
@@ -711,7 +710,8 @@ def plot_curves(
     """Bound / MIMO-GS / Exhaustive sweep / Statistical codebook / Random.
 
     Position NN is computed and stored in the CSVs but is deliberately not
-    drawn.
+    drawn.  The MLP is likewise still computed and still fills its CSV
+    columns; it is simply no longer a plotted series.
     """
     figure, axis = plt.subplots(figsize=(7.0, 5.2))
 
@@ -812,7 +812,6 @@ CDF_SERIES = (
     # (scheme key, label, color, linewidth, zorder)
     ("genie_greedy", "Genie", SCHEME_COLOR["genie_greedy"], 1.8, 5),
     ("mimogs_greedy", "MIMO-GS", SCHEME_COLOR["mimogs_greedy"], 1.8, 4),
-    ("mlp_greedy", "MLP", SCHEME_COLOR["mlp_greedy"], 1.6, 3.6),
     ("position_nn", "Position NN", SCHEME_COLOR["position_nn"], 1.6, 3.2),
     ("statistical", "Statistical codebook", SCHEME_COLOR["statistical"], 1.8, 3),
     ("random", "Random", SCHEME_COLOR["random"], 1.2, 1),

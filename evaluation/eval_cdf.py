@@ -43,13 +43,13 @@ LABEL_FONTSIZE = 14
 TICK_LABELSIZE = 12
 LEGEND_FONTSIZE = 10
 
-# Legend order is the drawing order.  MIMO-GS keeps "tab:blue" and MLP keeps
-# "tab:brown" so the reader can carry the colours over from the net-rate
-# figures of eval_net_rate.py; the remaining two are simply well separated.
+# Legend order is the drawing order.  MIMO-GS keeps "tab:blue" so the reader
+# can carry the colour over from the net-rate figures of eval_net_rate.py; the
+# remaining two are simply well separated.  The MLP column stays in the input
+# CSV and is simply not drawn.
 # (scheme label, csv column, colour, linewidth, zorder)
 CDF_SERIES = (
     ("MIMO-GS", "nmse_shape_dB_MIMO-GS", "tab:blue", 1.8, 5),
-    ("MLP", "nmse_shape_dB_MLP", "tab:brown", 1.6, 4),
     ("Nearest neighbor", "nmse_shape_dB_Nearest neighbor", "tab:purple", 1.6, 3),
     ("Sionna RT", "nmse_shape_dB_Sionna RT", "tab:red", 1.6, 2),
 )
