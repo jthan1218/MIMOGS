@@ -11,7 +11,8 @@ than reimplemented, so the scale cannot drift from the original.
 Four things differ from the original figure:
 
 * the data -- the 3947 locations of ``analysis/eval_t1/t1_per_location.csv``,
-  with the 544 RT-NaN locations dropped (uncolored) rather than plotted;
+  with the 544 RT-NaN locations drawn as light gray (``'0.8'``) dots beneath
+  the colored scatter rather than colored by the colormap;
 * the axis limits are pinned to x [0, 185], y [0, 160];
 * a black-star BS marker at (166, 104) is drawn (the original drew none);
 * the marker size is ``s=7.5`` rather than the original's ``s=4``, because the
@@ -153,8 +154,10 @@ def plot_gap_map_paper_quarter(
     output_dir: str,
     positions: np.ndarray,
     gap_db: np.ndarray,
+    gray_positions: np.ndarray,
 ) -> float:
-    """``eval_baseline_rt.plot_gap_map_paper`` verbatim, plus limits and a BS star."""
+    """``eval_baseline_rt.plot_gap_map_paper`` verbatim, plus limits, a BS star,
+    and the RT-invalid locations as light gray dots underneath."""
     plt.rcParams["font.family"] = "serif"
     plt.rcParams["font.serif"] = [
         "Times New Roman",
@@ -166,6 +169,19 @@ def plot_gap_map_paper_quarter(
     gap_limit = symmetric_gap_limit(gap_db)
 
     figure, axis = plt.subplots(figsize=(3.6, 3.0), layout="constrained")
+    # RT-invalid test locations, drawn first and at a lower zorder so they sit
+    # beneath every colored marker.  Same marker size; no colormap, no effect
+    # on the color limit -- they exist only so these locations read as test
+    # locations rather than as buildings.
+    axis.scatter(
+        gray_positions[:, 0],
+        gray_positions[:, 1],
+        color="0.8",
+        s=MARKER_SIZE,
+        linewidths=0.0,
+        rasterized=True,
+        zorder=1,
+    )
     scatter = axis.scatter(
         positions[:, 0],
         positions[:, 1],
@@ -176,6 +192,7 @@ def plot_gap_map_paper_quarter(
         vmax=gap_limit,
         linewidths=0.0,
         rasterized=True,
+        zorder=2,
     )
     axis.set_xlabel("x [m]", fontsize=6)
     axis.set_ylabel("y [m]", fontsize=6)
@@ -277,8 +294,10 @@ def write_report(output_dir: str, stats: dict) -> None:
         "    dNMSE = NMSE_shape(Sionna RT) - NMSE_shape(MIMO-GS)   [dB]",
         "",
         "positive (red) = ray tracer worse, negative (blue) = ray tracer better.",
-        "The 544 locations whose RT value is NaN are dropped before the scatter,",
-        "so they are uncolored (no marker) rather than plotted at any value.",
+        "The 544 locations whose RT value is NaN are excluded from the colored",
+        "scatter -- they carry no dNMSE value -- but are drawn as light gray",
+        "(`'0.8'`) dots at the same marker size and a lower zorder, beneath the",
+        "colored points, so they read as test locations rather than buildings.",
         "",
         "Re-rendering was avoidable because the CSV's MIMO-GS column comes from",
         "`outputs/density/mimogs/model_100.pth`, whose `capture` tuple is",
@@ -300,11 +319,11 @@ def write_report(output_dir: str, stats: dict) -> None:
         "",
         f"- Test locations in the CSV: {stats['n_locations']}",
         f"- Colored (plotted) locations, finite dNMSE: {stats['n_colored']}",
-        f"- RT-NaN locations, uncolored: {stats['n_rt_nan']}",
+        f"- RT-NaN locations, drawn as gray dots: {stats['n_gray']}",
         "",
-        "These are the same 3403 locations the original figure drew, so the",
-        "marker field is expected to look the same; the visible differences are",
-        "the tightened axes and the BS star.",
+        "The colored markers are the same 3403 locations the original figure",
+        "drew; the visible differences are the tightened axes, the BS star, and",
+        "the gray RT-invalid points.",
         "",
         "## dNMSE over the colored locations",
         "",
@@ -389,9 +408,11 @@ def main() -> int:
     difference = rt_values - mg_values
     finite = np.isfinite(difference)
 
-    # RT-NaN locations are dropped, not plotted: no marker is drawn for them.
+    # RT-NaN locations are excluded from the colored scatter but are still
+    # drawn, as light gray dots beneath it.
     positions = frame.loc[finite, ["x_m", "y_m"]].to_numpy(dtype=float)
     colored = difference[finite]
+    gray_positions = frame.loc[~finite, ["x_m", "y_m"]].to_numpy(dtype=float)
 
     rt_mean = float(np.nanmean(rt_values))
     mg_mean_all = float(np.mean(mg_values))
@@ -408,8 +429,13 @@ def main() -> int:
     iy = np.floor((frame["y_m"].to_numpy(float) - Y_MIN) / CELL).astype(int)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    gap_limit = plot_gap_map_paper_quarter(OUTPUT_DIR, positions, colored)
-    print(f"  wrote {FIGURE_STEM}.pdf / .png  (s={MARKER_SIZE:g})")
+    gap_limit = plot_gap_map_paper_quarter(
+        OUTPUT_DIR, positions, colored, gray_positions
+    )
+    print(
+        f"  wrote {FIGURE_STEM}.pdf / .png  (s={MARKER_SIZE:g}, "
+        f"{len(gray_positions)} gray RT-invalid points)"
+    )
 
     stats = {
         "checkpoint_note": checkpoint_note,
@@ -419,6 +445,7 @@ def main() -> int:
         "n_locations": int(len(frame)),
         "n_colored": int(finite.sum()),
         "n_rt_nan": int((~finite).sum()),
+        "n_gray": int(len(gray_positions)),
         "n_unique_cells": int(len(np.unique(iy * n_x + ix))),
         "collisions": collisions,
         "d_min": float(colored.min()),
@@ -443,7 +470,8 @@ def main() -> int:
 
     print(f"  color limit         : +/-{gap_limit:.0f} dB (symmetric_gap_limit)")
     print(f"  colored locations   : {stats['n_colored']}")
-    print(f"  RT-NaN (uncolored)  : {stats['n_rt_nan']}")
+    print(f"  RT-NaN (gray dots)  : {stats['n_rt_nan']}")
+    print(f"  gray points plotted : {stats['n_gray']}")
     print(
         f"  dNMSE min/max/mean  : {stats['d_min']:+.4f} / {stats['d_max']:+.4f} / "
         f"{stats['d_mean']:+.4f} dB"
