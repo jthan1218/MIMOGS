@@ -236,7 +236,14 @@ def gain_net_hidden_dim(checkpoint: dict) -> Optional[int]:
     hidden_dim = int(first_layer.shape[0])
     input_dim = int(first_layer.shape[1])
 
-    reference = gaussian_model_module.DynamicGainNet()
+    # The compatibility reference has to be built at the PE the checkpoint was
+    # trained with, otherwise a --gain_pe_frequencies 0 run (9 input features)
+    # is rejected against the default 117.  Checkpoints written before the
+    # argument existed carry no value and correctly fall back to 6.
+    checkpoint_model_params = checkpoint.get("model_params") or {}
+    reference = gaussian_model_module.DynamicGainNet(
+        num_frequencies=int(checkpoint_model_params.get("gain_pe_frequencies", 6))
+    )
     expected_input = int(reference.net[0].weight.shape[1])
     if input_dim != expected_input:
         raise SystemExit(
@@ -284,6 +291,10 @@ def build_scene_and_model(
         device=str(device),
         init_range=1.0,
         tie_covariance=bool(int(getattr(model_params, "tie_covariance", 0))),
+        # Restored from run_args.txt / the checkpoint's model_params by
+        # ``restore_config``; a run trained with --gain_pe_frequencies 0 has a
+        # 9-feature gain MLP and cannot load into the 117-feature default.
+        gain_pe_frequencies=int(getattr(model_params, "gain_pe_frequencies", 6)),
     )
 
     scene = Scene(model_params, gaussians, shuffle=False)

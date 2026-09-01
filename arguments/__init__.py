@@ -98,6 +98,13 @@ class ModelParams(ParamGroup):
         # only through the shared per-primitive gain.
         self.tie_covariance = 0
 
+        # Number of Fourier frequency bands the DynamicGainNet's positional
+        # encoding uses for each of its three 3-D inputs (xyz, rx, xyz-rx).
+        # 6 is the historical value and keeps every existing run bit-identical;
+        # 0 feeds the raw coordinates through instead (include_input stays
+        # True), so the gain MLP sees 3 x 3 = 9 features instead of 3 x 39.
+        self.gain_pe_frequencies = 6
+
         super().__init__(parser, "Model Parameters", sentinel)
 
     def extract(self, args):

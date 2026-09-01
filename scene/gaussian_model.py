@@ -212,12 +212,16 @@ class GaussianModel:
         device: str = "cuda",
         init_range: float = 5.0,
         tie_covariance: bool = False,
+        gain_pe_frequencies: int = 6,
     ):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.optimizer_type = optimizer_type
         self.target_gaussians = target_gaussians
         self.init_range = init_range
         self.tie_covariance = bool(int(tie_covariance))
+        # Fourier bands for the dynamic-gain MLP's positional encoding. 6 is
+        # the historical default; 0 hands the raw coordinates to the MLP.
+        self.gain_pe_frequencies = int(gain_pe_frequencies)
 
         self._xyz = torch.empty(0, device = self.device)
         self._xyz_tx = torch.empty(0, device = self.device)
@@ -236,7 +240,9 @@ class GaussianModel:
         self.importance_accum = torch.empty(0,device = self.device)
         self.importance_denom = torch.empty(0,device = self.device)
         
-        self.dynamic_gain_net = DynamicGainNet().to(self.device)
+        self.dynamic_gain_net = DynamicGainNet(
+            num_frequencies=self.gain_pe_frequencies
+        ).to(self.device)
         self.dynamic_gain_optimizer = None
         self.dynamic_gain_scheduler_args = None
         
