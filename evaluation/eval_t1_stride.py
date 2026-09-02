@@ -69,7 +69,7 @@ from utils.loss import normalize_mag_map  # noqa: E402
 # Fixed inputs -- this is a single-configuration table, nothing is discovered
 # ---------------------------------------------------------------------------
 DATASET_DIR = "dataset/asu_campus_16by64_lt_entire_stride4"
-MIMOGS_RUN = "outputs/20260831_084700"
+MIMOGS_RUN = "outputs/20260902_061552"
 BATCH_SIZE = 32
 
 OUTPUT_DIR = os.path.join(REPO_ROOT, "analysis", "eval_t1_stride")

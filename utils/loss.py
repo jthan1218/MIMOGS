@@ -6,11 +6,19 @@ def magnitude_mse_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor
 
 
 def normalize_mag_map(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    """Normalize each map independently by its maximum entry."""
+    """Normalize each map independently by its maximum entry.
+
+    The divisor is floored at the dtype's smallest positive normal, not at
+    ``eps``: a map whose peak is small but real must still come out with
+    max == 1, otherwise the shape/top-k terms compare a max-1 prediction
+    against a target that was never normalized.  ``eps`` is kept in the
+    signature for call-site compatibility and only guards an all-zero map.
+    """
+    tiny = torch.finfo(x.dtype).tiny
     if x.dim() <= 2:
-        return x / torch.amax(x).clamp_min(eps)
+        return x / torch.amax(x).clamp_min(tiny)
     reduce_dims = tuple(range(1, x.dim()))
-    scale = torch.amax(x, dim=reduce_dims, keepdim=True).clamp_min(eps)
+    scale = torch.amax(x, dim=reduce_dims, keepdim=True).clamp_min(tiny)
     return x / scale
 
 

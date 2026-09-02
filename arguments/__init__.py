@@ -51,7 +51,7 @@ class ModelParams(ParamGroup):
     """
 
     def __init__(self, parser: ArgumentParser, sentinel: bool = False):
-        self._source_path = "./dataset/asu_campus_16by64_lt"
+        self._source_path = "./dataset/asu_campus_16by64_lt_entire_stride4"
         self._model_path = ""
         self.data_device = "cuda"
         self.eval = False
@@ -74,8 +74,8 @@ class ModelParams(ParamGroup):
         # so both 0 and 1 can be supplied through the existing ParamGroup.
         self.batch_size = 8
         self.num_workers = 0
-        self.num_epochs = 50
-        self.target_gaussians = 25_000
+        self.num_epochs = 100
+        self.target_gaussians = 10_000
         self.use_cuda_rasterizer = 1
         self.use_amp = 0
 
