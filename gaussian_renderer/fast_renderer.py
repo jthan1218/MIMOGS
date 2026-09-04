@@ -67,7 +67,8 @@ def _safe_inv_cov_2x2(
     """Return precision components ``(p00,p01,p11)`` without an eigendecomp."""
     trace_half = 0.5 * (cov00 + cov11)
     diff_half = 0.5 * (cov00 - cov11)
-    radius = torch.sqrt((diff_half.square() + cov01.square()).clamp_min(0.0))
+
+    radius = torch.sqrt((diff_half.square() + cov01.square()).clamp_min(1e-12))
 
     lam_hi = trace_half + radius
     lam_lo = trace_half - radius
@@ -75,11 +76,7 @@ def _safe_inv_cov_2x2(
     inv_lo = torch.clamp(lam_lo, min=eig_floor).reciprocal()
 
     alpha = 0.5 * (inv_hi + inv_lo)
-    beta = torch.where(
-        radius > 1e-12,
-        0.5 * (inv_hi - inv_lo) / radius,
-        torch.zeros_like(radius),
-    )
+    beta = 0.5 * (inv_hi - inv_lo) / radius
     return torch.stack(
         [
             alpha + beta * diff_half,
